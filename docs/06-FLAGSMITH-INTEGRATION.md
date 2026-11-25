@@ -1,7 +1,7 @@
 # 06 --- Flagsmith Integration Notes
 
 **Version:** 0.1\
-**Status:** Read-only adapter implemented; live account verification pending
+**Status:** Read-only adapter and sandbox connectivity verified (2026-11-25)
 
 ## 1. Official documentation reviewed
 
@@ -242,6 +242,73 @@ were not exercised against Flagsmith during this verification.
 ### Automated suite
 
 `python -m pytest -q` from `backend/`: 18 passed, 0 failed, 1 skipped.
-The skipped test is the opt-in live integration test. Milestone 1 remains
-pending live verification until a non-production Management API token is
-configured locally and the authenticated read checks succeed.
+The skipped test is the opt-in live integration test. This was the state
+at the time of that earlier attempt; the successful live verification is
+recorded in Section 15 below.
+
+## 15. Live Flagsmith Verification — 2026-11-25
+
+### Configuration and authenticated reads
+
+The backend loaded a non-placeholder `FLAGSMITH_API_KEY` as `SecretStr`
+from the repository-root `.env`. The resolved base URL was
+`https://api.flagsmith.com`, the request timeout was 10 seconds, and the
+client's authorization scheme was `Api-Key`. The real connection-status
+route returned HTTP 200 with `configured=true` and `authenticated=true`.
+
+All discovery was read-only:
+
+| Operation | Live result |
+| --- | --- |
+| Project list | Array response; one accessible project; `ExperimentOps Demo` found |
+| Project environments | Array response with two environments; `Development` found |
+| Environment detail by UUID | Read succeeded; UUID and project association validated |
+| Project feature catalog | Paginated object (`count`, `next`, `previous`, `results`); one feature |
+| Target feature | `checkout_simplified` found |
+| Unknown environment UUID | HTTP 404 mapped to `FLAGSMITH_RESOURCE_NOT_FOUND` with sanitized message |
+
+No project IDs, environment UUIDs, environment API keys or credential
+values are recorded here.
+
+### Environment response contract
+
+The authenticated `GET /api/v1/projects/{id}/environments/` response was
+an array of environment objects. The observed objects include `id`,
+`uuid`, `name`, `project`, environment metadata and an `api_key` field.
+The environment detail endpoint returns an object with the same core
+identifier/name/project fields and also includes `api_key`.
+
+This live response differs from the published OpenAPI reference to
+`ProjectList`; that reference is incorrect for the actual response. The
+existing adapter already accepts an array and maps `uuid`, `name` and
+`project` into the internal schema, so no adapter change was justified.
+The paginated feature response was also accepted through the existing
+adapter.
+
+A regression fixture derived from the live environment shape is stored at
+`backend/tests/fixtures/flagsmith_project_environments.sanitized.json`.
+Its identifiers and metadata values are sanitized; the target environment
+name is retained, and the `api_key` field is omitted. The fixture test
+confirms the array/object structure and adapter mapping without relaxing
+validation.
+
+### Security, error handling and tests
+
+Source review confirms all outbound Flagsmith operations use HTTP GET,
+the HTTPX timeout is bounded at 10 seconds, and each HTTPX client is
+closed by its request context manager. The API key is not returned by
+internal schemas or error responses. Error handling tests cover missing
+credentials, 401, 403, 404, 429, 5xx, timeout and unexpected response
+cases with mocked responses; the live unknown-environment 404 also
+confirmed sanitized error mapping. Invalid credentials and insufficient
+permissions were not tested against the live account because doing so
+would require using a different credential or changing permissions.
+
+With `FLAGSMITH_INTEGRATION=1`, the complete suite ran against the
+configured environment: **20 passed, 0 failed, 0 skipped**, including one
+live Flagsmith discovery test and the mocked/configuration tests. Python
+compilation also succeeded. No write or mutation request was made.
+
+The Milestone 1 read-only connectivity acceptance criteria are met for
+the configured sandbox. Experiment planning, approval and writes remain
+outside this milestone's verified scope.

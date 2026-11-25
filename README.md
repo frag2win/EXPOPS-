@@ -7,8 +7,8 @@ ExperimentOps turns a developer's intent into a validated, reviewable
 experiment plan, then carries out approved management-plane operations
 through Flagsmith.
 
-> **Project status:** Milestone 1 read-only backend implementation. Live
-> Flagsmith connectivity has not yet been verified with project credentials.
+> **Project status:** Milestone 1 read-only backend and sandbox connectivity
+> verified on 2026-11-25. No planning or write workflows are implemented yet.
 
 ## The problem
 

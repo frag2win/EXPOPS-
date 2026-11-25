@@ -1,6 +1,8 @@
 """Mocked Flagsmith adapter, API, and security contract tests."""
 
 import logging
+import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -85,6 +87,22 @@ async def test_invalid_upstream_shape_is_rejected():
     adapter = make_adapter(lambda _: httpx.Response(200, json={"unexpected": True}))
     with pytest.raises(FlagsmithInvalidResponseError):
         await adapter.list_projects()
+
+
+@pytest.mark.asyncio
+async def test_sanitized_live_environment_shape_maps_without_api_key():
+    fixture_path = Path(__file__).parent / "fixtures" / "flagsmith_project_environments.sanitized.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, list)
+    assert "uuid" in payload[0] and "project" in payload[0]
+    assert "api_key" not in payload[0]
+
+    adapter = make_adapter(lambda _: httpx.Response(200, json=payload))
+    environments = await adapter.list_environments("101")
+    assert len(environments) == 1
+    assert environments[0].id == "00000000-0000-4000-8000-000000000001"
+    assert environments[0].name == "Development"
+    assert environments[0].project_id == "101"
 
 
 @pytest.mark.asyncio
