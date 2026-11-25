@@ -7,8 +7,8 @@ ExperimentOps turns a developer's intent into a validated, reviewable
 experiment plan, then carries out approved management-plane operations
 through Flagsmith.
 
-> **Project status:** Documentation and architecture baseline.
-> Implementation has not started.
+> **Project status:** Milestone 1 read-only backend implementation. Live
+> Flagsmith connectivity has not yet been verified with project credentials.
 
 ## The problem
 
@@ -113,6 +113,49 @@ vertical slice:
 -   require approval;
 -   execute one supported operation;
 -   verify the result by reading Flagsmith again.
+
+The current implementation is the discovery foundation for this slice:
+health, connection status, projects, environments and project feature
+catalog reads. It intentionally has no planning, approvals or write
+operations yet.
+
+## Run the backend
+
+Requirements: Python 3.12 or newer. Copy `.env.example` to `.env` in the
+repository root and set `FLAGSMITH_API_KEY` to an organization Management
+API token. Keep the token server-side; the API never returns it. The
+default Cloud URL is `https://api.flagsmith.com`; set
+`FLAGSMITH_API_URL` for a self-hosted instance.
+
+From the repository root in PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e "backend[dev]"
+python -m uvicorn app.main:app --reload --app-dir backend
+```
+
+Open `http://127.0.0.1:8000/docs` for the generated API docs. Available
+routes:
+
+- `GET /health`
+- `GET /api/v1/connections/flagsmith/status`
+- `GET /api/v1/flagsmith/projects`
+- `GET /api/v1/flagsmith/projects/{project_id}/environments`
+- `GET /api/v1/flagsmith/environments/{environment_id}`
+- `GET /api/v1/flagsmith/environments/{environment_id}/flags`
+- `GET /api/v1/flagsmith/projects/{project_id}/flags/{feature_id}`
+
+Environment identifiers returned by ExperimentOps are Flagsmith UUIDs;
+the upstream environment API key is never returned. The `/flags` endpoint
+resolves the environment's project and returns that project's feature
+catalog. It does not return identity overrides or evaluated values.
+
+Run mocked tests with `python -m pytest -q backend/tests`. The optional
+read-only live check is skipped by default. To enable it, set
+`FLAGSMITH_INTEGRATION=1` and `FLAGSMITH_API_KEY` in the environment, then
+run `python -m pytest -q backend/tests/integration`.
 
 Only after this works should we add richer analytics, multiple agent
 roles or additional integrations.

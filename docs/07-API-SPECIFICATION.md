@@ -38,6 +38,24 @@ Lists accessible projects.
 
 Lists environments for a verified project.
 
+ExperimentOps returns a normalized environment identifier, name and
+project ID. The identifier is the Flagsmith environment UUID, not its
+environment API key; credentials must not be returned to the browser.
+
+### `GET /flagsmith/environments/{environment_id}`
+
+Reads normalized environment metadata by Flagsmith UUID.
+
+### `GET /flagsmith/environments/{environment_id}/flags`
+
+Resolves the environment's project and lists its project-level feature
+catalog. This does not enumerate identity overrides or provide evaluated
+environment values.
+
+### `GET /flagsmith/projects/{project_id}/flags/{feature_id}`
+
+Reads an individual project feature by project and feature ID.
+
 ### `GET /flagsmith/environments/{environment_id}/preflight`
 
 Checks the selected environment and returns prerequisite findings,

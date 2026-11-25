@@ -1,0 +1,57 @@
+"""ExperimentOps FastAPI application factory."""
+
+import logging
+import uuid
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from app.api.routes import router
+from app.core.config import Settings, get_settings
+from app.core.logging import configure_logging
+from app.integrations.flagsmith.adapter import FlagsmithAdapter
+from app.integrations.flagsmith.client import FlagsmithClient
+from app.integrations.flagsmith.exceptions import FlagsmithError
+
+logger = logging.getLogger("experimentops")
+
+
+def create_app(settings: Settings | None = None, adapter: FlagsmithAdapter | None = None) -> FastAPI:
+    """Create the API and wire its Flagsmith adapter."""
+    config = settings or get_settings()
+    configure_logging(config.log_level)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        await app.state.flagsmith_adapter.client.close()
+
+    application = FastAPI(title="ExperimentOps API", version="0.1.0", lifespan=lifespan)
+    api_key = config.flagsmith_api_key.get_secret_value() if config.flagsmith_api_key else None
+    application.state.flagsmith_adapter = adapter or FlagsmithAdapter(
+        FlagsmithClient(config.flagsmith_api_url, api_key, config.flagsmith_timeout_seconds)
+    )
+
+    @application.middleware("http")
+    async def request_id_middleware(request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    @application.exception_handler(FlagsmithError)
+    async def flagsmith_error_handler(request: Request, exc: FlagsmithError) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.warning("Flagsmith read failed", extra={"request_id": request_id, "error_code": exc.code})
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": exc.code, "message": str(exc)}, "request_id": request_id},
+        )
+
+    application.include_router(router)
+    return application
+
+
+app = create_app()
