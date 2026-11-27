@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     flagsmith_api_url: str = "https://api.flagsmith.com"
     flagsmith_api_key: SecretStr | None = None
     flagsmith_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-3.5-flash-lite"
+    llm_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
 
     @field_validator("flagsmith_api_url")
     @classmethod

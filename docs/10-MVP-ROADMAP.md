@@ -3,10 +3,9 @@
 **Version:** 0.1\
 **Timebox:** Three-day hackathon implementation plan
 
-> **Status (2026-11-25):** Milestone 1 read-only discovery and Milestone 2
-> deterministic experiment planning/validation are implemented. Persistence,
-> LLM brief extraction, approval workflow, Flagsmith writes, result reporting,
-> and frontend remain deferred.
+> **Status (2026-11-27):** Milestones 1 and 2 and Milestone 3 AI-assisted
+> specification drafting are implemented. Persistence, approval workflow,
+> Flagsmith writes, result reporting, and frontend remain deferred.
 
 ## Guiding rule
 
@@ -36,12 +35,13 @@ Flagsmith request.
 -   [ ] Read projects/environments/flags.
 -   [ ] Define ExperimentBrief and ExperimentPlan schemas.
 -   [ ] Implement deterministic validator.
--   [ ] Implement prompt-to-structured-brief flow.
+-   [x] Implement optional prompt-to-structured-draft flow with provenance.
 -   [ ] Implement plan persistence.
 -   [ ] Build basic plan preview UI.
 
-**Exit criterion:** A natural-language prompt produces a validated plan
-without making writes.
+**Exit criterion:** A natural-language prompt produces a draft and
+deterministic validation without making writes. AI suggestions remain
+unconfirmed until the user explicitly confirms them.
 
 ## Day 2 --- Approval and execution
 

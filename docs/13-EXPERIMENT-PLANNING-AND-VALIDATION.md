@@ -11,6 +11,9 @@ Pydantic v2 models (`app/domain/experiments/models.py`), a pure rules engine
 (`validator.py`), a read-only Flagsmith prerequisite inspector and orchestration
 service (`app/services/experiment_planning.py`), and routes in
 `app/api/experiment_routes.py`. Plans are not persisted. No LLM is involved.
+This document describes the deterministic Milestone 2 contract; the separate
+Milestone 3 drafting endpoint is documented in
+[`14-AI-ASSISTED-SPECIFICATION.md`](14-AI-ASSISTED-SPECIFICATION.md).
 
 The inspector uses only the existing GET-based Flagsmith adapter to resolve an
 accessible project, an environment listed under that project and confirmed by
@@ -117,7 +120,9 @@ returned.
 - No warehouse integration exists; readiness remains UNKNOWN.
 - SDK instrumentation is operator-declared only and is never asserted from
   source inspection.
-- No LLM, frontend, persistence, approval workflow, feature/metric/experiment
-  creation, start/stop, results, or Flagsmith write operation is included.
+- The deterministic planning engine itself has no LLM dependency. Milestone 3
+  adds a separate optional draft route. There is no frontend, persistence,
+  approval workflow, feature/metric/experiment creation, start/stop, results,
+  or Flagsmith write operation.
 - A `READY_FOR_REVIEW` response is a planning result only and is not an
   executed experiment or evidence of real traffic.

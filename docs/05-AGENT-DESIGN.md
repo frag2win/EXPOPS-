@@ -2,9 +2,10 @@
 
 **Version:** 0.1
 
-> **Current implementation boundary (2026-11-25):** No LLM or agent
-> orchestration is implemented. Milestone 2 accepts structured input and runs
-> deterministic validation; it does not infer missing values or execute tools.
+> **Current implementation boundary (2026-11-27):** Milestone 3 adds an
+> optional LLM-backed specification draft. It does not expose tools to the
+> model or execute operations. Milestone 2 deterministic validation remains
+> authoritative; approval and execution are not implemented.
 
 ## 1. Agent objective
 
@@ -137,3 +138,19 @@ maintain an audit trail.
 
 A later integration may inspect application instrumentation, but
 automatic source-code modification is outside the MVP.
+
+## 9. Implemented drafting flow (Milestone 3)
+
+`POST /api/v1/experiments/draft` sends only the user's request, bounded
+constraints, and optional structured specification to the configured
+provider. Provider output is required to match a strict structured schema,
+then parsed and validated as the existing `ExperimentSpecification`. The
+service attaches field provenance, withholds unconfirmed high-risk suggestions,
+and passes the specification to deterministic planning. Unknown instrumentation
+and warehouse readiness remain unknown. Clarification questions are derived
+from missing fields, unconfirmed suggestions, conflicts, and ambiguities.
+
+The model receives no Flagsmith client, credentials, or resource discovery
+results. It cannot call tools or select arbitrary endpoints. Malformed output
+or provider errors fail safely; no mocked success is returned. Only an explicit
+user confirmation supplied in a later request marks a suggestion confirmed.

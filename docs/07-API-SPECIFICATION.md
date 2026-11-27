@@ -1,13 +1,17 @@
 # 07 --- Internal API Specification
 
 **Version:** 0.1\
-**Status:** Milestone 1 and 2 routes implemented; remaining proposals are future work
+**Status:** Milestones 1–3 routes implemented; remaining proposals are future work
 
 > **Implemented routes (2026-11-25):** `GET /api/v1/experiments/health`,
 > `POST /api/v1/experiments/validate`, and `POST /api/v1/experiments/plan`
 > are available. See `docs/13-EXPERIMENT-PLANNING-AND-VALIDATION.md` for
 > request and response schemas. This milestone implements no write, approval,
 > persistence, or execution endpoint.
+
+> **Milestone 3 addition (2026-11-27):** `POST /api/v1/experiments/draft`
+> optionally converts text to a provenance-aware structured draft and invokes
+> deterministic planning. See `docs/14-AI-ASSISTED-SPECIFICATION.md`.
 
 All routes are under `/api/v1`. These are ExperimentOps endpoints, not
 Flagsmith endpoints.
@@ -68,6 +72,22 @@ Checks the selected environment and returns prerequisite findings,
 including warehouse readiness where supported.
 
 ## 3. Planning
+
+### `POST /experiments/draft`
+
+Accepts a natural-language request plus optional constraints and structured
+provided/confirmed fields. Returns a strict experiment specification,
+field-level provenance, missing information, clarification questions,
+suggestions, conflicts, ambiguities, and the deterministic planning report.
+The route requires a configured provider; it does not fall back to mocked
+output. Requests are bounded to 32 KiB at the ASGI boundary. Provider failures
+use safe error codes and do not include provider bodies or headers. This route
+does not approve or execute the plan.
+
+See the dedicated document for the full request and response contract.
+
+> **Proposal only:** The `/plans`, approval, execution, and result endpoints
+> below are target API designs; they are not implemented routes.
 
 ### `POST /plans`
 

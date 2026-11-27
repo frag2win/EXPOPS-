@@ -9,6 +9,12 @@
 
 ## 1. Technology choices
 
+> **Milestone 3 implementation note (2026-11-27):** An optional structured
+> output provider feeds a provenance-aware draft service. Its output is
+> validated by the existing Pydantic domain model and deterministic planner.
+> There is no LLM tool access, persistence, approval, or write operation.
+> See `docs/14-AI-ASSISTED-SPECIFICATION.md`.
+
   -----------------------------------------------------------------------
   Layer                   Choice                  Reason
   ----------------------- ----------------------- -----------------------
@@ -178,6 +184,14 @@ files; - full LLM context containing secrets; - unredacted request
 bodies if they may contain credentials.
 
 ## 8. Configuration
+
+LLM configuration is optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, and bounded
+`LLM_TIMEOUT_SECONDS`. The initial provider is Google Gemini through the
+`google-genai` SDK with native JSON Schema response output. Provider failures
+are mapped to typed safe errors. Prompts are sent to the configured Google
+Gemini API; retention and processing follow the applicable Google API account
+and policy. Never log prompt, provider response body, API key, or authorization
+header.
 
 Use environment variables for local development. `.env` must be ignored
 by Git. `.env.example` contains names and safe placeholders only.

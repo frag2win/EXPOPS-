@@ -1,16 +1,18 @@
 # ExperimentOps
 
 **Long-term product vision:** an AI-assisted, approval-first control plane
-for managing Flagsmith experiments. Current Milestone 2 uses no LLM.
+for managing Flagsmith experiments. Milestone 3 adds optional LLM-assisted
+specification drafting; deterministic validation remains authoritative.
 
 The long-term goal is to turn a developer's intent into a validated,
 reviewable plan and support approved management-plane operations through
-Flagsmith. Current Milestone 2 stops at planning and validation.
+Flagsmith. Current implementation also offers an optional AI-assisted draft;
+the implemented workflow still stops before approval and execution.
 
-> **Project status:** Milestone 1 read-only integration and Milestone 2
-> deterministic planning/validation are implemented. Planning is ephemeral;
-> no approval workflow, Flagsmith writes, execution, LLM, database, or frontend
-> are implemented.
+> **Project status:** Milestones 1 and 2, plus Milestone 3 AI-assisted
+> specification drafting, are implemented. Drafts are ephemeral and require
+> user review. There is no approval workflow, Flagsmith write, execution,
+> database persistence, or frontend.
 
 ## The problem
 
@@ -121,7 +123,9 @@ vertical slice:
 
 Milestone 1 provides read-only discovery. Milestone 2 adds structured
 specifications, deterministic validation, a reviewable proposal and explicit
-prerequisite status. A `READY_FOR_REVIEW` plan is not approved or executed.
+prerequisite status. Milestone 3 optionally drafts fields from natural
+language and marks provenance and confirmation requirements. A
+`READY_FOR_REVIEW` plan is not approved or executed.
 Warehouse readiness and SDK instrumentation are unknown unless supplied as
 operator evidence; the backend does not independently verify either.
 
@@ -139,6 +143,29 @@ replace those placeholders only in the ignored repository-root `.env` file.
 The current backend does not consume `DATABASE_URL` or connect to a database;
 database persistence is not implemented. Never put database credentials in
 `.env.example` or documentation.
+
+AI drafting is disabled unless a real Gemini API key is configured in the
+ignored `.env`:
+
+```ini
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3.5-flash-lite
+LLM_TIMEOUT_SECONDS=20
+```
+
+The provider uses Google's `google-genai` SDK and Gemini native JSON Schema
+output with model `gemini-3.5-flash-lite` by default. `POST
+/api/v1/experiments/draft` sends the submitted natural-language request,
+constraints, and optional structured specification to Google. Do not include
+secrets or personal data in prompts. A missing key returns a safe error; the
+service does not silently fall back. Mocked development and automated tests do
+not make live Gemini API calls.
+
+One synthetic live acceptance request completed the drafting and deterministic
+planning pipeline with HTTP 200 on 2026-11-27. This verifies that request path
+and configured model for that smoke only; unsupported ambiguity paths were
+verified offline, and whether alias normalization was needed in the live
+response is unknown. See the AI-assisted specification document for details.
 
 From the repository root in PowerShell:
 
@@ -162,6 +189,7 @@ routes:
 - `GET /api/v1/experiments/health`
 - `POST /api/v1/experiments/validate`
 - `POST /api/v1/experiments/plan`
+- `POST /api/v1/experiments/draft`
 
 Environment identifiers returned by ExperimentOps are Flagsmith UUIDs;
 the upstream environment API key is never returned. The `/flags` endpoint
@@ -175,6 +203,8 @@ run `python -m pytest -q backend/tests/integration`.
 
 See [Experiment planning and validation](docs/13-EXPERIMENT-PLANNING-AND-VALIDATION.md)
 for request fields, validation rules, readiness states and current limitations.
+See [AI-assisted specification drafting](docs/14-AI-ASSISTED-SPECIFICATION.md)
+for provider configuration, provenance, request limits, and safety boundaries.
 
 ## Official references
 

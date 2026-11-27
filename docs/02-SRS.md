@@ -1,11 +1,13 @@
 # 02 --- Software Requirements Specification (SRS)
 
 **Version:** 0.1\
-**Status:** Baseline specification; Milestones 1 and 2 implement a subset
+**Status:** Baseline specification; Milestones 1–3 implement a subset
 
-> **Implementation status (2026-11-25):** Milestone 2 implements the
-> deterministic, ephemeral planning and validation scope. Persistence, LLM
-> extraction, approvals and execution remain future work.
+> **Implementation status (2026-11-27):** Milestones 2 and 3 implement
+> deterministic ephemeral planning plus optional AI-assisted drafting. The
+> LLM supplies an untrusted draft only; Pydantic validation and deterministic
+> planning remain authoritative. Persistence, approvals and execution remain
+> future work.
 
 ## 1. System overview
 
@@ -126,6 +128,19 @@ manage Flagsmith resources.
 -   LLM provider is isolated behind an interface.
 -   Validation rules are deterministic and unit tested.
 -   API schemas are versioned.
+
+### AI-assisted drafting boundary
+
+-   Drafting is opt-in and requires a configured supported provider.
+-   Provider output is parsed into the existing strict experiment schema and
+    then passed through deterministic validation.
+-   Provenance identifies user-provided, AI-inferred, user-confirmed and
+    unknown values. AI suggestions requiring confirmation cannot be treated
+    as confirmed plan inputs.
+-   Provider requests contain no Flagsmith credential or Flagsmith API
+    response. Drafting cannot call Flagsmith tools directly.
+-   Drafting never approves, persists, creates, modifies, enables, disables,
+    or executes an experiment.
 
 ## 4. Core user flow
 

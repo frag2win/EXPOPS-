@@ -8,6 +8,10 @@ from app.domain.experiments.models import (
     ValidationReport,
 )
 from app.integrations.flagsmith.adapter import FlagsmithAdapter
+from app.agents.experiment_specification import ExperimentSpecificationAgent
+from app.domain.experiments.draft_models import ExperimentDraftRequest, ExperimentDraftResponse
+from app.llm.factory import get_structured_output_provider
+from app.llm.protocols import StructuredOutputProvider
 from app.services.experiment_planning import ExperimentPlanningService
 
 router = APIRouter(prefix="/api/v1/experiments", tags=["experiments"])
@@ -26,3 +30,13 @@ async def validate_experiment(spec: ExperimentSpecification, adapter: FlagsmithA
 @router.post("/plan", response_model=ExperimentPlanResponse)
 async def plan_experiment(spec: ExperimentSpecification, adapter: FlagsmithAdapter = Depends(get_flagsmith_adapter)) -> ExperimentPlanResponse:
     return await ExperimentPlanningService(adapter).plan(spec)
+
+
+@router.post("/draft", response_model=ExperimentDraftResponse)
+async def draft_experiment(
+    payload: ExperimentDraftRequest,
+    provider: StructuredOutputProvider = Depends(get_structured_output_provider),
+    adapter: FlagsmithAdapter = Depends(get_flagsmith_adapter),
+) -> ExperimentDraftResponse:
+    agent = ExperimentSpecificationAgent(provider, ExperimentPlanningService(adapter))
+    return await agent.draft(payload)

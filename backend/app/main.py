@@ -10,11 +10,13 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import router
 from app.api.experiment_routes import router as experiment_router
+from app.core.request_limits import DraftRequestSizeLimitMiddleware
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.integrations.flagsmith.adapter import FlagsmithAdapter
 from app.integrations.flagsmith.client import FlagsmithClient
 from app.integrations.flagsmith.exceptions import FlagsmithError
+from app.llm.errors import GeminiProviderError, LLMError
 
 logger = logging.getLogger("experimentops")
 
@@ -30,6 +32,8 @@ def create_app(settings: Settings | None = None, adapter: FlagsmithAdapter | Non
         await app.state.flagsmith_adapter.client.close()
 
     application = FastAPI(title="ExperimentOps API", version="0.1.0", lifespan=lifespan)
+    application.state.settings = config
+    application.add_middleware(DraftRequestSizeLimitMiddleware)
     api_key = config.flagsmith_api_key.get_secret_value() if config.flagsmith_api_key else None
     application.state.flagsmith_adapter = adapter or FlagsmithAdapter(
         FlagsmithClient(config.flagsmith_api_url, api_key, config.flagsmith_timeout_seconds)
@@ -50,6 +54,19 @@ def create_app(settings: Settings | None = None, adapter: FlagsmithAdapter | Non
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": str(exc)}, "request_id": request_id},
+        )
+
+    @application.exception_handler(LLMError)
+    async def llm_error_handler(request: Request, exc: LLMError) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "unknown")
+        diagnostic = exc.diagnostic if isinstance(exc, GeminiProviderError) else {"category": exc.code}
+        logger.warning("Language model request failed", extra={"request_id": request_id, **diagnostic})
+        error = {"code": exc.code, "message": str(exc)}
+        if isinstance(exc, GeminiProviderError) and exc.upstream_status_code is not None:
+            error["upstream_status_code"] = exc.upstream_status_code
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": error, "request_id": request_id},
         )
 
     @application.exception_handler(RequestValidationError)
