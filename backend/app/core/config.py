@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,36 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.5-flash-lite"
     llm_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    database_url: SecretStr | None = None
+
+    def __init__(self, **values):
+        super().__init__(**values)
+        self._validate_database_url()
+
+    def _validate_database_url(self) -> None:
+        value = self.database_url
+        if value is None:
+            return
+        raw = value.get_secret_value().strip()
+        if not raw:
+            self.database_url = None
+            return
+        try:
+            parsed = urlsplit(raw)
+            valid = (
+                parsed.scheme == "postgresql+psycopg"
+                and parsed.hostname is not None
+                and parsed.path.strip("/") != ""
+                and not parsed.fragment
+            )
+            # Accessing .port validates malformed or out-of-range port values.
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
+                valid = False
+        except ValueError:
+            valid = False
+        if not valid:
+            # Avoid Pydantic's normal validation error, which echoes raw input.
+            raise ValueError("DATABASE_URL must be a valid postgresql+psycopg URL with a host and database") from None
 
     @field_validator("flagsmith_api_url")
     @classmethod

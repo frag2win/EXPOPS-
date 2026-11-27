@@ -1,8 +1,9 @@
 """Milestone 1 health and read-only Flagsmith routes."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, Response
 
 from app.api.dependencies import get_flagsmith_adapter
+from app.db.health import DatabaseHealthResponse, check_database
 from app.integrations.flagsmith.adapter import FlagsmithAdapter
 from app.integrations.flagsmith.exceptions import FlagsmithAuthenticationError
 from app.integrations.flagsmith.schemas import (
@@ -21,6 +22,22 @@ router = APIRouter()
 @router.get("/health", response_model=HealthResponse, tags=["health"])
 async def health() -> HealthResponse:
     return HealthResponse()
+
+
+@router.get("/health/database", response_model=DatabaseHealthResponse, tags=["health"])
+async def database_health(request: Request, response: Response) -> DatabaseHealthResponse:
+    result = await check_database(
+        request.app.state.database_runtime.engine
+        if request.app.state.database_runtime is not None
+        else None
+    )
+    if request.app.state.database_startup_failed:
+        result = DatabaseHealthResponse(
+            status="unavailable", configured=True, reachable=None,
+        )
+    if result.status != "ready":
+        response.status_code = 503
+    return result
 
 
 @router.get("/api/v1/connections/flagsmith/status", response_model=ConnectionStatus, tags=["connections"])

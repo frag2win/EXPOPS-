@@ -137,12 +137,15 @@ API token. Keep the token server-side; the API never returns it. The
 default Cloud URL is `https://api.flagsmith.com`; set
 `FLAGSMITH_API_URL` for a self-hosted instance.
 
-The template's `DATABASE_URL` uses the PostgreSQL psycopg driver and explicit
-placeholders. If configuring a local PostgreSQL database for development,
-replace those placeholders only in the ignored repository-root `.env` file.
-The current backend does not consume `DATABASE_URL` or connect to a database;
-database persistence is not implemented. Never put database credentials in
-`.env.example` or documentation.
+The template's `DATABASE_URL` uses the PostgreSQL Psycopg 3 driver and explicit
+placeholders. Database configuration is optional. When configured, M4.1
+creates an async SQLAlchemy engine during application lifespan and exposes
+`GET /health/database`; existing M1–M3 endpoints do not require PostgreSQL.
+The Alembic baseline is empty: plan persistence, approval, and audit tables
+are not implemented. Put real local credentials only in the ignored root
+`.env`, never in `.env.example` or documentation. See
+[`docs/08-DATABASE-DESIGN.md`](docs/08-DATABASE-DESIGN.md) for setup and
+migration commands.
 
 AI drafting is disabled unless a real Gemini API key is configured in the
 ignored `.env`:
@@ -167,12 +170,22 @@ and configured model for that smoke only; unsupported ambiguity paths were
 verified offline, and whether alias normalization was needed in the live
 response is unknown. See the AI-assisted specification document for details.
 
-From the repository root in PowerShell:
+From the repository root, start the application with the platform-specific
+command. On Windows PowerShell, use the single-process launcher so Psycopg's
+async connections run on a per-run `SelectorEventLoop`:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e "backend[dev]"
+python backend/run_windows.py
+```
+
+The Windows launcher intentionally runs without reload or multiple workers;
+the Windows Selector loop does not support asyncio subprocesses. On Linux or
+macOS, use Uvicorn's standard loop and development reload:
+
+```bash
 python -m uvicorn app.main:app --reload --app-dir backend
 ```
 
@@ -180,6 +193,7 @@ Open `http://127.0.0.1:8000/docs` for the generated API docs. Available
 routes:
 
 - `GET /health`
+- `GET /health/database`
 - `GET /api/v1/connections/flagsmith/status`
 - `GET /api/v1/flagsmith/projects`
 - `GET /api/v1/flagsmith/projects/{project_id}/environments`

@@ -2,6 +2,11 @@
 
 **Version:** 0.1
 
+> **M4.1 implementation status (2026-11-28):** PostgreSQL configuration,
+> async SQLAlchemy runtime, safe database readiness, and Alembic infrastructure
+> are implemented. The baseline migration is empty. Plan, approval, execution,
+> and audit tables below remain proposed and have not been created.
+
 ## 1. Design principles
 
 -   Persist plans and execution history, not unnecessary
@@ -11,7 +16,69 @@
 -   Make approval refer to an immutable plan version/hash.
 -   Store external Flagsmith IDs separately from internal IDs.
 
-## 2. Core entities
+## 1.1 Implemented M4.1 infrastructure
+
+`DATABASE_URL` is optional and loaded as a Pydantic `SecretStr`. The only
+accepted URL scheme is `postgresql+psycopg`; the connection string is not
+returned by health checks or database error handling. The FastAPI lifespan
+creates a pooled async SQLAlchemy engine only when configured and disposes it
+on shutdown. Existing application endpoints do not depend on database
+connectivity.
+
+Psycopg 3's asynchronous API is incompatible with the default Windows
+`ProactorEventLoop`. On Windows, start the API from the repository root with
+`python backend/run_windows.py`. The launcher creates a Selector loop only for
+the server run and does not alter the process-wide loop policy. It runs one
+worker without reload because Windows Selector loops do not support asyncio
+subprocesses. Online Alembic commands and the opt-in PostgreSQL test select the
+same loop explicitly for their own runs. Linux and macOS keep their standard
+event-loop behavior.
+
+The database readiness endpoint is `GET /health/database`. It executes `SELECT
+1` and reports `ready`, `unavailable`, or `not_configured`. The last state has
+`reachable: null` because no connection check was possible. The existing
+`GET /health` remains an application health check and does not imply database
+readiness.
+
+Alembic is configured under `backend/alembic.ini`; its initial `m4_1_empty`
+revision creates no business tables. `Base.metadata` is empty at this stage.
+Generate and apply migrations from `backend/` after setting `DATABASE_URL` in
+the ignored repository-root `.env`:
+
+```powershell
+python -m pip install -e ".[dev]"
+alembic -c alembic.ini revision --autogenerate -m "describe schema change"
+alembic -c alembic.ini upgrade head
+alembic -c alembic.ini current
+python -m pytest -q tests
+```
+
+The repository-root `.env.example` shows the supported URL format with
+explicit placeholders. URL-encode special characters in local credentials.
+Create a local PostgreSQL role and database with the local PostgreSQL
+administration tools, for example in `psql` as a local administrator:
+
+```sql
+CREATE ROLE experimentops LOGIN PASSWORD '<local-password>';
+CREATE DATABASE experimentops OWNER experimentops;
+```
+
+Put the corresponding URL only in the ignored repository-root `.env`. Do not
+place real credentials in the template or documentation. The database health
+check does not create tables or run migrations.
+
+The optional PostgreSQL integration test runs only when
+`EXPOPS_POSTGRES_INTEGRATION=1` and `TEST_DATABASE_URL` are explicitly set. Use
+a dedicated local test database; its URL shape is
+`postgresql+psycopg://<user>:<password>@localhost:5432/<test_db>`. The test
+checks connectivity and transaction rollback using a temporary table, then
+disposes the engine. It creates no persistent application tables. The test
+runner selects a compatible event loop for the test itself; this does not
+replace the separate Windows application launcher check.
+
+## 2. Proposed core entities (not implemented)
+
+The following tables remain design targets. M4.1 creates none of them.
 
 ### `users`
 

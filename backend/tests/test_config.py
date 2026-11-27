@@ -24,3 +24,34 @@ def test_non_tls_non_local_urls_are_rejected(url):
 def test_timeout_bounds_are_validated():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, flagsmith_timeout_seconds=0)
+
+
+def test_database_url_is_optional_and_secret_backed():
+    from pydantic import SecretStr
+
+    settings = Settings(_env_file=None, database_url="postgresql+psycopg://local-user:local-pass@localhost:5432/experimentops")
+    assert isinstance(settings.database_url, SecretStr)
+    assert "local-pass" not in str(settings.database_url)
+    assert Settings(_env_file=None, database_url="").database_url is None
+    assert Settings(_env_file=None).database_url is None
+
+
+@pytest.mark.parametrize("url", [
+    "sqlite:///experimentops.db",
+    "postgresql://user:pass@localhost/db",
+    "file:///tmp/database",
+    "not-a-url",
+    "postgresql+psycopg://localhost",
+    "postgresql+psycopg://user:pass@localhost:99999/db",
+])
+def test_unsupported_or_malformed_database_urls_fail_without_echoing_value(url):
+    with pytest.raises(ValueError) as caught:
+        Settings(_env_file=None, database_url=url)
+    assert url not in str(caught.value)
+
+
+def test_database_url_uses_environment_variable_name(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://user:pass@localhost:5432/experimentops")
+    settings = Settings(_env_file=None)
+    assert settings.database_url is not None
+    assert "**********" in str(settings.database_url)

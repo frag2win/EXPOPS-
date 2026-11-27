@@ -15,6 +15,13 @@
 > There is no LLM tool access, persistence, approval, or write operation.
 > See `docs/14-AI-ASSISTED-SPECIFICATION.md`.
 
+> **M4.1 implementation note (2026-11-28):** Optional PostgreSQL
+> infrastructure now uses SQLAlchemy 2 async sessions with Psycopg 3 and
+> Alembic. Only connection configuration, engine/session lifecycle, an
+> isolated database readiness check, and an empty baseline migration exist.
+> No plan, approval, execution, or audit tables exist yet. Existing M1–M3
+> endpoints do not require database configuration.
+
   -----------------------------------------------------------------------
   Layer                   Choice                  Reason
   ----------------------- ----------------------- -----------------------
@@ -195,6 +202,20 @@ header.
 
 Use environment variables for local development. `.env` must be ignored
 by Git. `.env.example` contains names and safe placeholders only.
+
+`DATABASE_URL` is optional and is parsed as `SecretStr`; M4.1 accepts the
+`postgresql+psycopg://` scheme. The async engine is created during application
+lifespan only when configured, uses bounded pooling and a five-second connect
+timeout, and is disposed at shutdown. Psycopg 3 async requires a Selector loop
+on Windows. `backend/run_windows.py` uses a scoped `asyncio` loop factory for
+the Uvicorn server without changing the global event-loop policy; use its
+single-process, no-reload mode on Windows. Alembic's online migration runner
+and the opt-in PostgreSQL test use the same per-run platform loop selection.
+Linux and macOS continue to use their normal asyncio loop. Database connectivity is reported by
+`GET /health/database`; it does not change the meaning of `GET /health`.
+`backend/alembic.ini` loads the URL from application settings rather than a
+committed connection string. See `docs/08-DATABASE-DESIGN.md` for local setup
+and migration commands. The initial migration is empty.
 
 Keep Flagsmith credentials on the backend. For a single-user hackathon
 demo, a server-side environment variable is acceptable; a multi-user

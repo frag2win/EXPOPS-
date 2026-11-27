@@ -13,6 +13,7 @@ from app.api.experiment_routes import router as experiment_router
 from app.core.request_limits import DraftRequestSizeLimitMiddleware
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
+from app.db.runtime import DatabaseRuntime, create_database_runtime
 from app.integrations.flagsmith.adapter import FlagsmithAdapter
 from app.integrations.flagsmith.client import FlagsmithClient
 from app.integrations.flagsmith.exceptions import FlagsmithError
@@ -28,11 +29,33 @@ def create_app(settings: Settings | None = None, adapter: FlagsmithAdapter | Non
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        await app.state.flagsmith_adapter.client.close()
+        database_runtime: DatabaseRuntime | None = None
+        app.state.database_startup_failed = False
+        if config.database_url is not None:
+            try:
+                database_runtime = create_database_runtime(config.database_url)
+            except Exception:
+                # Engine construction errors may include the database URL.
+                logger.warning("Database runtime initialization failed")
+                app.state.database_startup_failed = True
+        app.state.database_runtime = database_runtime
+        try:
+            yield
+        finally:
+            if database_runtime is not None:
+                try:
+                    await database_runtime.dispose()
+                except Exception:
+                    logger.warning("Database engine disposal failed")
+            try:
+                await app.state.flagsmith_adapter.client.close()
+            except Exception:
+                logger.warning("Flagsmith client cleanup failed")
 
     application = FastAPI(title="ExperimentOps API", version="0.1.0", lifespan=lifespan)
     application.state.settings = config
+    application.state.database_runtime = None
+    application.state.database_startup_failed = False
     application.add_middleware(DraftRequestSizeLimitMiddleware)
     api_key = config.flagsmith_api_key.get_secret_value() if config.flagsmith_api_key else None
     application.state.flagsmith_adapter = adapter or FlagsmithAdapter(
