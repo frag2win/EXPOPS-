@@ -1,14 +1,16 @@
 # ExperimentOps
 
-**An AI-powered, approval-first control plane for managing Flagsmith
-experiments.**
+**Long-term product vision:** an AI-assisted, approval-first control plane
+for managing Flagsmith experiments. Current Milestone 2 uses no LLM.
 
-ExperimentOps turns a developer's intent into a validated, reviewable
-experiment plan, then carries out approved management-plane operations
-through Flagsmith.
+The long-term goal is to turn a developer's intent into a validated,
+reviewable plan and support approved management-plane operations through
+Flagsmith. Current Milestone 2 stops at planning and validation.
 
-> **Project status:** Milestone 1 read-only backend and sandbox connectivity
-> verified on 2026-11-25. No planning or write workflows are implemented yet.
+> **Project status:** Milestone 1 read-only integration and Milestone 2
+> deterministic planning/validation are implemented. Planning is ephemeral;
+> no approval workflow, Flagsmith writes, execution, LLM, database, or frontend
+> are implemented.
 
 ## The problem
 
@@ -24,6 +26,8 @@ application's instrumentation.
 
 ## Product boundary
 
+The following describes the intended product, not completed functionality:
+
 ExperimentOps is **not**: - a replacement for Flagsmith; - a game or
 application analytics SDK; - a tool that fabricates experiment traffic
 or results; - a generic chat interface that only writes instructions; -
@@ -36,7 +40,7 @@ configuration consistency; - an approval-gated executor for supported
 Flagsmith operations; - an audit trail for plans, approvals, execution
 and outcomes.
 
-## MVP workflow
+## Intended MVP workflow (not implemented end-to-end)
 
 1.  Developer describes the experiment.
 2.  Agent extracts the hypothesis, variants, allocation, success metric,
@@ -93,7 +97,8 @@ approval.
 │   ├── 09-SECURITY-AND-SAFETY.md
 │   ├── 10-MVP-ROADMAP.md
 │   ├── 11-TESTING-STRATEGY.md
-│   └── 12-HACKATHON-SUBMISSION.md
+│   ├── 12-HACKATHON-SUBMISSION.md
+│   └── 13-EXPERIMENT-PLANNING-AND-VALIDATION.md
 ├── backend/
 ├── frontend/
 ├── tests/
@@ -114,10 +119,11 @@ vertical slice:
 -   execute one supported operation;
 -   verify the result by reading Flagsmith again.
 
-The current implementation is the discovery foundation for this slice:
-health, connection status, projects, environments and project feature
-catalog reads. It intentionally has no planning, approvals or write
-operations yet.
+Milestone 1 provides read-only discovery. Milestone 2 adds structured
+specifications, deterministic validation, a reviewable proposal and explicit
+prerequisite status. A `READY_FOR_REVIEW` plan is not approved or executed.
+Warehouse readiness and SDK instrumentation are unknown unless supplied as
+operator evidence; the backend does not independently verify either.
 
 ## Run the backend
 
@@ -126,6 +132,13 @@ repository root and set `FLAGSMITH_API_KEY` to an organization Management
 API token. Keep the token server-side; the API never returns it. The
 default Cloud URL is `https://api.flagsmith.com`; set
 `FLAGSMITH_API_URL` for a self-hosted instance.
+
+The template's `DATABASE_URL` uses the PostgreSQL psycopg driver and explicit
+placeholders. If configuring a local PostgreSQL database for development,
+replace those placeholders only in the ignored repository-root `.env` file.
+The current backend does not consume `DATABASE_URL` or connect to a database;
+database persistence is not implemented. Never put database credentials in
+`.env.example` or documentation.
 
 From the repository root in PowerShell:
 
@@ -146,6 +159,9 @@ routes:
 - `GET /api/v1/flagsmith/environments/{environment_id}`
 - `GET /api/v1/flagsmith/environments/{environment_id}/flags`
 - `GET /api/v1/flagsmith/projects/{project_id}/flags/{feature_id}`
+- `GET /api/v1/experiments/health`
+- `POST /api/v1/experiments/validate`
+- `POST /api/v1/experiments/plan`
 
 Environment identifiers returned by ExperimentOps are Flagsmith UUIDs;
 the upstream environment API key is never returned. The `/flags` endpoint
@@ -157,8 +173,8 @@ read-only live check is skipped by default. To enable it, set
 `FLAGSMITH_INTEGRATION=1` and `FLAGSMITH_API_KEY` in the environment, then
 run `python -m pytest -q backend/tests/integration`.
 
-Only after this works should we add richer analytics, multiple agent
-roles or additional integrations.
+See [Experiment planning and validation](docs/13-EXPERIMENT-PLANNING-AND-VALIDATION.md)
+for request fields, validation rules, readiness states and current limitations.
 
 ## Official references
 

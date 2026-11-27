@@ -2,6 +2,10 @@
 
 **Version:** 0.1
 
+> **Current implementation boundary (2026-11-25):** No LLM or agent
+> orchestration is implemented. Milestone 2 accepts structured input and runs
+> deterministic validation; it does not infer missing values or execute tools.
+
 ## 1. Agent objective
 
 Translate a developer's experiment intent into a validated,

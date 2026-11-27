@@ -5,9 +5,11 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.routes import router
+from app.api.experiment_routes import router as experiment_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.integrations.flagsmith.adapter import FlagsmithAdapter
@@ -50,7 +52,15 @@ def create_app(settings: Settings | None = None, adapter: FlagsmithAdapter | Non
             content={"error": {"code": exc.code, "message": str(exc)}, "request_id": request_id},
         )
 
+    @application.exception_handler(RequestValidationError)
+    async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "unknown")
+        # Never serialize Pydantic's `input` or `ctx`: request bodies can contain secrets.
+        issues = [{"location": [str(part) for part in error.get("loc", ())], "message": "Field has an invalid value.", "type": error.get("type", "value_error")} for error in exc.errors()]
+        return JSONResponse(status_code=422, content={"error": {"code": "REQUEST_VALIDATION_FAILED", "message": "Request validation failed", "issues": issues}, "request_id": request_id})
+
     application.include_router(router)
+    application.include_router(experiment_router)
     return application
 
 

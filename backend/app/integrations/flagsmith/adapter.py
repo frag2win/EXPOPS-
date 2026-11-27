@@ -7,7 +7,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.integrations.flagsmith.client import FlagsmithClient
 from app.integrations.flagsmith.exceptions import FlagsmithInvalidResponseError
-from app.integrations.flagsmith.schemas import Environment, EnvironmentInfo, FeatureFlag, Project
+from app.integrations.flagsmith.schemas import Environment, EnvironmentInfo, FeatureFlag, FeatureVariantOption, Project
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -98,6 +98,23 @@ class FlagsmithAdapter:
     @staticmethod
     def _feature(value: object) -> FeatureFlag:
         item = _mapping(value)
+        options = item.get("multivariate_options")
+        parsed_options = None
+        if options is not None:
+            if not isinstance(options, list):
+                raise FlagsmithInvalidResponseError("Flagsmith returned an unexpected feature option shape")
+            parsed_options = []
+            for raw in options:
+                option = _mapping(raw)
+                kind = option.get("type")
+                field = {"int": ("integer", "integer_value"), "unicode": ("string", "string_value"), "bool": ("boolean", "boolean_value")}.get(kind)
+                if field is None or option.get("id") is None or field[1] not in option or option[field[1]] is None:
+                    raise FlagsmithInvalidResponseError("Flagsmith returned an unsupported feature option")
+                parsed_options.append(_validated(FeatureVariantOption, {
+                    "id": str(option.get("id")), "key": option.get("key"),
+                    "value_type": field[0], "value": option[field[1]],
+                    "default_allocation": option.get("default_percentage_allocation"),
+                }))
         normalized = {
             "id": str(item.get("id")),
             "name": item.get("name"),
@@ -105,5 +122,6 @@ class FlagsmithAdapter:
             "type": item.get("type"),
             "initial_value": item.get("initial_value"),
             "enabled": item.get("enabled"),
+            "multivariate_options": parsed_options,
         }
         return _validated(FeatureFlag, normalized)

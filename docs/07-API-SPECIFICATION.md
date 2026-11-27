@@ -1,7 +1,13 @@
 # 07 --- Internal API Specification
 
 **Version:** 0.1\
-**Status:** Proposed; implement incrementally
+**Status:** Milestone 1 and 2 routes implemented; remaining proposals are future work
+
+> **Implemented routes (2026-11-25):** `GET /api/v1/experiments/health`,
+> `POST /api/v1/experiments/validate`, and `POST /api/v1/experiments/plan`
+> are available. See `docs/13-EXPERIMENT-PLANNING-AND-VALIDATION.md` for
+> request and response schemas. This milestone implements no write, approval,
+> persistence, or execution endpoint.
 
 All routes are under `/api/v1`. These are ExperimentOps endpoints, not
 Flagsmith endpoints.

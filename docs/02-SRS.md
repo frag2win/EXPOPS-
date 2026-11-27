@@ -1,7 +1,11 @@
 # 02 --- Software Requirements Specification (SRS)
 
 **Version:** 0.1\
-**Status:** Proposed MVP
+**Status:** Baseline specification; Milestones 1 and 2 implement a subset
+
+> **Implementation status (2026-11-25):** Milestone 2 implements the
+> deterministic, ephemeral planning and validation scope. Persistence, LLM
+> extraction, approvals and execution remain future work.
 
 ## 1. System overview
 

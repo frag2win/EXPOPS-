@@ -3,6 +3,11 @@
 **Version:** 0.1\
 **Timebox:** Three-day hackathon implementation plan
 
+> **Status (2026-11-25):** Milestone 1 read-only discovery and Milestone 2
+> deterministic experiment planning/validation are implemented. Persistence,
+> LLM brief extraction, approval workflow, Flagsmith writes, result reporting,
+> and frontend remain deferred.
+
 ## Guiding rule
 
 Build one complete vertical slice before adding breadth. A working read

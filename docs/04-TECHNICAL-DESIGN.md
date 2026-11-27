@@ -2,6 +2,11 @@
 
 **Version:** 0.1
 
+> **Milestone 2 implementation note (2026-11-25):** Experiment planning is
+> implemented as Pydantic domain models, a pure validator, a read-only
+> Flagsmith prerequisite inspector and FastAPI routes. Plans are not persisted.
+> See `docs/13-EXPERIMENT-PLANNING-AND-VALIDATION.md` for the actual contract.
+
 ## 1. Technology choices
 
   -----------------------------------------------------------------------

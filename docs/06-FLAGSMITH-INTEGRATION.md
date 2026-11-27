@@ -312,3 +312,19 @@ compilation also succeeded. No write or mutation request was made.
 The Milestone 1 read-only connectivity acceptance criteria are met for
 the configured sandbox. Experiment planning, approval and writes remain
 outside this milestone's verified scope.
+# Milestone 2 prerequisite inspection update (2026-11-25)
+
+The read-only adapter now retains typed feature `multivariate_options` from the
+project feature catalog. The live `ExperimentOps Demo` project,
+`Development` environment and `checkout_simplified` feature were discovered
+again using the configured backend credential. The feature was `STANDARD` and
+returned an explicitly empty options list. The planner therefore reports the
+feature as unavailable for experiment configuration; mere presence in the
+catalog is not considered experimentation support.
+
+The planner performs only the existing project, environment and feature GET
+operations. It does not call any warehouse endpoint: no warehouse readiness
+operation has been verified, so warehouse status is `UNKNOWN`. SDK/event
+instrumentation is not inspected by this service; any submitted declaration is
+operator evidence and remains labelled unverified. The full planner contract
+and current behavior are in `docs/13-EXPERIMENT-PLANNING-AND-VALIDATION.md`.
