@@ -144,8 +144,22 @@ in legacy columns. The upgrade verifies row counts before dropping the
 renamed source table. This migration is forward-only because downgrade would
 discard owner/provenance data.
 
-`LOCAL_OWNER_SUBJECT` configures the local principal (default
-`local-development`). Client request bodies cannot set it. Manual persistence
+`LOCAL_OWNER_SUBJECT` is required server configuration for persisted-plan
+operations; the example configuration sets it to `local-development`, but
+there is no runtime fallback. Its value is trimmed and must be printable text
+of at most 255 characters. Missing or invalid configuration causes protected
+operations to fail closed with a sanitized service-unavailable response.
+FastAPI resolves one canonical typed principal from server settings through a
+shared dependency. Request bodies cannot set identity (unknown fields are
+rejected), `owner_subject` query parameters are rejected, and client headers
+are never used to resolve identity.
+
+All persisted operations pass this principal explicitly to the persistence
+service: creation stores its subject, and plan listing, current retrieval,
+version history, exact-version retrieval, and version append are owner-scoped.
+Missing and foreign-owned plan identifiers have the same not-found response.
+This abstraction is suitable for future auditable approval/rejection decisions,
+but no decision or execution behavior is implemented here. Manual persistence
 is available at `POST /api/v1/experiments/plans`; a new immutable version can
 be appended at `POST /api/v1/experiments/plans/{plan_id}/versions`. Current
 and exact-version retrieval are available at `GET

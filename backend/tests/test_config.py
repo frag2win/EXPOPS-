@@ -55,3 +55,17 @@ def test_database_url_uses_environment_variable_name(monkeypatch):
     settings = Settings(_env_file=None)
     assert settings.database_url is not None
     assert "**********" in str(settings.database_url)
+
+
+def test_local_owner_subject_is_optional_and_normalized():
+    assert Settings(_env_file=None).local_owner_subject is None
+    assert Settings(
+        _env_file=None,
+        local_owner_subject="  local-operator  ",
+    ).local_owner_subject == "local-operator"
+
+
+@pytest.mark.parametrize("subject", ["", "   ", "invalid\nsubject", "x" * 256])
+def test_invalid_local_owner_subject_is_rejected(subject):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, local_owner_subject=subject)

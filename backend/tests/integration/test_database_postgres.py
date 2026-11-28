@@ -27,6 +27,7 @@ from app.domain.experiments.models import (
     ExperimentPlan, ExperimentPlanResponse, ExperimentSpecification,
     ExternalPrerequisite, PlanReadiness, ReadinessStatus, ValidationReport,
 )
+from app.domain.identity import Principal
 from app.persistence.experiment_plans import (
     LEGACY_OWNER_SUBJECT, PlanIntegrityError, append_plan_version, create_plan,
     get_plan, get_plan_version, list_plans,
@@ -40,6 +41,10 @@ pytestmark = pytest.mark.skipif(
     or not os.getenv("TEST_DATABASE_URL"),
     reason="Set EXPOPS_POSTGRES_INTEGRATION=1 and TEST_DATABASE_URL to opt in",
 )
+
+
+def _principal(owner: str) -> Principal:
+    return Principal(subject=owner)
 
 
 def test_postgresql_connectivity_and_transaction_rollback():
@@ -160,7 +165,7 @@ async def _verify_legacy_migration(database_url: str, owner: str, plan_id):
     try:
         async with runtime.session_factory() as session:
             async with session.begin():
-                result = await get_plan(session, plan_id, owner)
+                result = await get_plan(session, plan_id, _principal(owner))
                 assert result is not None
                 identity, version = result
                 assert identity.owner_subject == LEGACY_OWNER_SUBJECT
@@ -173,7 +178,7 @@ async def _verify_legacy_migration(database_url: str, owner: str, plan_id):
                 assert version.hash_format_version == 0
                 assert version.legacy_updated_at.year == 2026
                 changed_principal = await get_plan(
-                    session, plan_id, "principal-changed-after-migration",
+                    session, plan_id, _principal("principal-changed-after-migration"),
                 )
                 assert changed_principal is not None
     finally:
@@ -247,20 +252,24 @@ async def _verify_postgresql_plan_persistence(database_url: str):
     try:
         async with transaction_scope(runtime.session_factory) as session:
             identity, first = await create_plan(
-                session, owner, first_snapshot, provenance, draft,
+                session, _principal(owner), first_snapshot, provenance, draft,
             )
 
         async with runtime.session_factory() as session:
             async with session.begin():
-                current = await get_plan(session, identity.id, owner)
+                current = await get_plan(session, identity.id, _principal(owner))
                 assert current is not None
                 assert current[1].version == 1
                 assert current[1].provenance_json == [p.model_dump(mode="json") for p in provenance]
                 assert current[1].draft_json == draft.model_dump(mode="json")
                 assert current[1].validation_json["external_prerequisites"][0]["evidence"] == "project-id"
                 assert current[1].content_hash == first.content_hash
-                assert await get_plan(session, identity.id, "different-principal") is None
-                assert await get_plan_version(session, identity.id, 1, owner) is not None
+                assert await get_plan(
+                    session, identity.id, _principal("different-principal"),
+                ) is None
+                assert await get_plan_version(
+                    session, identity.id, 1, _principal(owner),
+                ) is not None
 
         mutation_attempts = (
             (
@@ -280,20 +289,24 @@ async def _verify_postgresql_plan_persistence(database_url: str):
 
         async with transaction_scope(runtime.session_factory) as session:
             second = await append_plan_version(
-                session, identity.id, owner, _planning_snapshot("version two"), provenance,
+                session, identity.id, _principal(owner),
+                _planning_snapshot("version two"), provenance,
             )
             assert second is not None and second[1].version == 2
         async with runtime.session_factory() as session:
             async with session.begin():
-                old_version = await get_plan_version(session, identity.id, 1, owner)
-                current = await get_plan(session, identity.id, owner)
+                old_version = await get_plan_version(
+                    session, identity.id, 1, _principal(owner),
+                )
+                current = await get_plan(session, identity.id, _principal(owner))
                 assert old_version is not None and old_version[1].content_hash == first.content_hash
                 assert current is not None and current[1].version == 2
 
         async def append_concurrently(name: str) -> int:
             async with transaction_scope(runtime.session_factory) as session:
                 result = await append_plan_version(
-                    session, identity.id, owner, _planning_snapshot(name), provenance,
+                    session, identity.id, _principal(owner),
+                    _planning_snapshot(name), provenance,
                 )
                 assert result is not None
                 return result[1].version
@@ -305,20 +318,23 @@ async def _verify_postgresql_plan_persistence(database_url: str):
         assert sorted(allocated) == [3, 4]
         async with runtime.session_factory() as session:
             async with session.begin():
-                current = await get_plan(session, identity.id, owner)
+                current = await get_plan(session, identity.id, _principal(owner))
                 assert current is not None and current[1].version == 4
 
         rolled_back_id = None
         with pytest.raises(RuntimeError):
             async with transaction_scope(runtime.session_factory) as session:
                 rolled_back, _ = await create_plan(
-                    session, owner, _planning_snapshot("rolled back"), provenance,
+                    session, _principal(owner),
+                    _planning_snapshot("rolled back"), provenance,
                 )
                 rolled_back_id = rolled_back.id
                 raise RuntimeError("test rollback")
         async with runtime.session_factory() as session:
             async with session.begin():
-                assert await get_plan(session, rolled_back_id, owner) is None
+                assert await get_plan(
+                    session, rolled_back_id, _principal(owner),
+                ) is None
 
         await _verify_draft_api_round_trip(runtime, database_url, owner)
         await _verify_corruption_detection(runtime, owner)
@@ -329,7 +345,7 @@ async def _verify_postgresql_plan_persistence(database_url: str):
 async def _verify_corruption_detection(runtime, owner: str):
     async with transaction_scope(runtime.session_factory) as session:
         identity, _ = await create_plan(
-            session, owner, _planning_snapshot("tamper detection"),
+            session, _principal(owner), _planning_snapshot("tamper detection"),
         )
     for sql in (
         """
@@ -353,12 +369,12 @@ async def _verify_corruption_detection(runtime, owner: str):
         with pytest.raises(PlanIntegrityError):
             async with runtime.session_factory() as session:
                 async with session.begin():
-                    await get_plan(session, identity.id, owner)
+                    await get_plan(session, identity.id, _principal(owner))
         with pytest.raises(PlanIntegrityError):
             async with runtime.session_factory() as session:
                 async with session.begin():
                     await list_plans(
-                        session, owner, offset=0, limit=20,
+                        session, _principal(owner), offset=0, limit=20,
                     )
 
 
@@ -411,6 +427,13 @@ async def _verify_draft_api_round_trip(runtime, database_url: str, owner: str):
             FieldProvenance.model_validate(item)
             for item in body["provenance"]
         ]
+        async with runtime.session_factory() as session:
+            async with session.begin():
+                persisted = await get_plan(
+                    session, UUID(body["id"]), _principal(owner),
+                )
+                assert persisted is not None
+                assert persisted[0].owner_subject == owner
         assert body["draft"] is not None
         assert {item["source"] for item in body["provenance"]} >= {
             "AI_INFERRED", "USER_CONFIRMED", "USER_PROVIDED", "UNKNOWN",
@@ -442,18 +465,19 @@ async def _verify_draft_api_round_trip(runtime, database_url: str, owner: str):
             await append_plan_version(
                 session,
                 UUID(body["id"]),
-                owner,
+                _principal(owner),
                 _planning_snapshot("Persisted review version two"),
                 persisted_provenance,
             )
             await create_plan(
                 session,
-                owner,
+                _principal(owner),
                 _planning_snapshot("Another listed plan"),
                 persisted_provenance,
             )
             foreign_identity, _ = await create_plan(
-                session, f"{owner}-foreign", _planning_snapshot("Foreign plan"),
+                session, _principal(f"{owner}-foreign"),
+                _planning_snapshot("Foreign plan"),
             )
 
         history = await client.get(
@@ -505,6 +529,24 @@ async def _verify_draft_api_round_trip(runtime, database_url: str, owner: str):
         assert (await client.get(
             f"/api/v1/experiments/plans/{uuid4()}",
         )).json() == {"detail": "Experiment plan was not found."}
+        assert (
+            await client.get(
+                f"/api/v1/experiments/plans/{foreign_identity.id}/versions",
+            )
+        ).status_code == 404
+        assert (
+            await client.get(
+                f"/api/v1/experiments/plans/{foreign_identity.id}/versions/1",
+            )
+        ).status_code == 404
+        async with transaction_scope(runtime.session_factory) as session:
+            assert await append_plan_version(
+                session,
+                foreign_identity.id,
+                _principal(owner),
+                _planning_snapshot("Unauthorized version attempt"),
+                persisted_provenance,
+            ) is None
 
         settings.local_owner_subject = "different-configured-principal"
         hidden = await client.get(f"/api/v1/experiments/plans/{body['id']}")

@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api import experiment_routes
 from app.core.config import Settings
+from app.domain.identity import Principal
 from app.domain.experiments.draft_models import ExperimentDraftRequest, ProvenanceSource
 from app.domain.experiments.models import ExperimentSpecification
 from app.main import create_app
@@ -191,7 +192,11 @@ async def test_migrated_legacy_owner_remains_visible_after_principal_change():
             assert key == (plan_id, 1)
             return version
 
-    result = await get_plan(LegacySession(), plan_id, "new-local-principal")
+    result = await get_plan(
+        LegacySession(),
+        plan_id,
+        Principal(subject="new-local-principal"),
+    )
     assert result is not None
     assert result[0].owner_subject == LEGACY_OWNER_SUBJECT
 
@@ -252,6 +257,7 @@ async def test_server_side_draft_persistence_uses_agent_provenance_and_omits_pro
     saved = await experiment_routes.draft_and_persist_experiment_plan(
         ExperimentDraftRequest(request="Private draft prompt"),
         SimpleNamespace(app=app),
+        Principal(subject="test-principal"),
         Provider(),
         Adapter(),
     )
@@ -259,7 +265,7 @@ async def test_server_side_draft_persistence_uses_agent_provenance_and_omits_pro
     assert saved.version == 1
     assert saved.draft is not None
     assert any(item.source == ProvenanceSource.AI_INFERRED for item in saved.provenance)
-    assert captured["owner"] == "test-principal"
+    assert captured["owner"] == Principal(subject="test-principal")
     assert "Private draft prompt" not in json.dumps(captured["draft"].model_dump(mode="json"))
 
 

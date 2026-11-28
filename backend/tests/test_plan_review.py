@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api import experiment_routes
 from app.core.config import Settings
+from app.llm.factory import get_structured_output_provider
 from app.main import create_app
 from app.persistence.experiment_plans import PlanIntegrityError
 
@@ -80,7 +81,7 @@ async def test_list_uses_server_owner_and_database_pagination(monkeypatch):
     calls = []
 
     async def fake_list_plans(_session, owner, *, offset, limit):
-        calls.append((owner, offset, limit))
+        calls.append((owner.subject, offset, limit))
         return [
             {
                 "id": PLAN_ID,
@@ -103,7 +104,10 @@ async def test_list_uses_server_owner_and_database_pagination(monkeypatch):
         transport=ASGITransport(app=app),
         base_url="http://experimentops.test",
     ) as client:
-        response = await client.get("/api/v1/experiments/plans?page=2&page_size=1")
+        response = await client.get(
+            "/api/v1/experiments/plans?page=2&page_size=1",
+            headers={"X-Owner-Subject": "attacker", "Authorization": "Bearer attacker"},
+        )
 
     assert response.status_code == 200
     assert calls == [(OWNER, 1, 1)]
@@ -139,6 +143,37 @@ async def test_list_rejects_owner_override_and_invalid_pagination(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_missing_principal_fails_closed_and_body_identity_is_rejected(monkeypatch):
+    unconfigured = create_app(Settings(_env_file=None))
+    unconfigured.state.database_runtime = SimpleNamespace(session_factory=object())
+    configured = _app(monkeypatch)
+    configured.dependency_overrides[get_structured_output_provider] = lambda: object()
+    async with AsyncClient(
+        transport=ASGITransport(app=unconfigured),
+        base_url="http://experimentops.test",
+    ) as client:
+        missing_principal = await client.get("/api/v1/experiments/plans")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=configured),
+        base_url="http://experimentops.test",
+    ) as client:
+        body_override = await client.post(
+            "/api/v1/experiments/plans",
+            json={"name": "Client identity attempt", "owner_subject": "attacker"},
+        )
+        draft_body_override = await client.post(
+            "/api/v1/experiments/drafts",
+            json={"request": "Draft", "owner_subject": "attacker"},
+        )
+
+    assert missing_principal.status_code == 503
+    assert "owner" not in missing_principal.text.lower()
+    assert body_override.status_code == 422
+    assert draft_body_override.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_current_history_and_historical_review_responses(monkeypatch):
     app = _app(monkeypatch)
     identity = _identity()
@@ -147,18 +182,18 @@ async def test_current_history_and_historical_review_responses(monkeypatch):
 
     async def fake_get_plan(_session, plan_id, owner):
         assert plan_id == PLAN_ID
-        assert owner == OWNER
+        assert owner.subject == OWNER
         return identity, versions[0]
 
     async def fake_get_plan_version(_session, plan_id, version_number, owner):
         assert plan_id == PLAN_ID
-        assert owner == OWNER
+        assert owner.subject == OWNER
         return identity, versions_by_number[version_number]
 
     async def fake_list_versions(
         _session, plan_id, owner, *, offset, limit,
     ):
-        assert (plan_id, owner, offset, limit) == (PLAN_ID, OWNER, 0, 20)
+        assert (plan_id, owner.subject, offset, limit) == (PLAN_ID, OWNER, 0, 20)
         return identity, versions, 2
 
     monkeypatch.setattr(experiment_routes, "get_plan", fake_get_plan)
@@ -205,7 +240,7 @@ async def test_missing_and_foreign_plans_return_same_safe_not_found(monkeypatch)
     app = _app(monkeypatch)
 
     async def hidden_plan(_session, _plan_id, owner):
-        assert owner == OWNER
+        assert owner.subject == OWNER
         return None
 
     monkeypatch.setattr(experiment_routes, "get_plan", hidden_plan)

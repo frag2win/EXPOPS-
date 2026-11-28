@@ -4,8 +4,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from app.api.dependencies import get_flagsmith_adapter
+from app.api.dependencies import get_current_principal, get_flagsmith_adapter
 from app.db.runtime import session_scope, transaction_scope
+from app.domain.identity import Principal
 from app.domain.experiments.models import (
     ExperimentEngineHealth, ExperimentPlanResponse, ExperimentSpecification,
     ValidationReport,
@@ -68,14 +69,6 @@ def _record_response(identity, version) -> PersistedExperimentPlan:
         draft=version.draft_json,
         created_at=version.created_at,
     )
-
-
-def _reject_owner_override(request: Request) -> None:
-    if "owner_subject" in request.query_params:
-        raise HTTPException(
-            status_code=422,
-            detail="The plan owner is determined by server configuration.",
-        )
 
 
 def _provenance_summary(provenance: list[dict]) -> ProvenanceSummary:
@@ -158,6 +151,7 @@ def _review_response(identity, version) -> PlanReviewResponse:
 async def persist_experiment_plan(
     spec: ExperimentSpecification,
     request: Request,
+    principal: Principal = Depends(get_current_principal),
     adapter: FlagsmithAdapter = Depends(get_flagsmith_adapter),
 ) -> PersistedExperimentPlan:
     runtime = request.app.state.database_runtime
@@ -167,7 +161,7 @@ async def persist_experiment_plan(
     async with transaction_scope(runtime.session_factory) as session:
         identity, version = await create_plan(
             session,
-            request.app.state.settings.local_owner_subject,
+            principal,
             response,
             provenance=manual_provenance(spec),
         )
@@ -179,6 +173,7 @@ async def append_experiment_plan_version(
     plan_id: str,
     spec: ExperimentSpecification,
     request: Request,
+    principal: Principal = Depends(get_current_principal),
     adapter: FlagsmithAdapter = Depends(get_flagsmith_adapter),
 ) -> PersistedExperimentPlan:
     runtime = request.app.state.database_runtime
@@ -193,7 +188,7 @@ async def append_experiment_plan_version(
         result = await append_plan_version(
             session,
             parsed_id,
-            request.app.state.settings.local_owner_subject,
+            principal,
             response,
             provenance=manual_provenance(spec),
         )
@@ -206,6 +201,7 @@ async def append_experiment_plan_version(
 async def draft_and_persist_experiment_plan(
     payload: ExperimentDraftRequest,
     request: Request,
+    principal: Principal = Depends(get_current_principal),
     provider: StructuredOutputProvider = Depends(get_structured_output_provider),
     adapter: FlagsmithAdapter = Depends(get_flagsmith_adapter),
 ) -> PersistedExperimentPlan:
@@ -217,7 +213,7 @@ async def draft_and_persist_experiment_plan(
     async with transaction_scope(runtime.session_factory) as session:
         identity, version = await create_plan(
             session,
-            request.app.state.settings.local_owner_subject,
+            principal,
             draft.planning,
             provenance=draft.provenance,
             draft=draft,
@@ -228,10 +224,10 @@ async def draft_and_persist_experiment_plan(
 @router.get("/plans", response_model=PlanListResponse)
 async def list_saved_experiment_plans(
     request: Request,
+    principal: Principal = Depends(get_current_principal),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> PlanListResponse:
-    _reject_owner_override(request)
     runtime = request.app.state.database_runtime
     if runtime is None:
         raise HTTPException(status_code=503, detail="Plan persistence is not configured.")
@@ -239,7 +235,7 @@ async def list_saved_experiment_plans(
     async with session_scope(runtime.session_factory) as session:
         rows, total = await list_plans(
             session,
-            request.app.state.settings.local_owner_subject,
+            principal,
             offset=offset,
             limit=page_size,
         )
@@ -270,8 +266,8 @@ async def list_saved_experiment_plans(
 async def get_persisted_experiment_plan(
     plan_id: str,
     request: Request,
+    principal: Principal = Depends(get_current_principal),
 ) -> PlanReviewResponse:
-    _reject_owner_override(request)
     runtime = request.app.state.database_runtime
     if runtime is None:
         raise HTTPException(status_code=503, detail="Plan persistence is not configured.")
@@ -280,7 +276,7 @@ async def get_persisted_experiment_plan(
     except ValueError:
         raise HTTPException(status_code=404, detail="Experiment plan was not found.") from None
     async with session_scope(runtime.session_factory) as session:
-        result = await get_plan(session, parsed_id, request.app.state.settings.local_owner_subject)
+        result = await get_plan(session, parsed_id, principal)
     if result is None:
         raise HTTPException(status_code=404, detail="Experiment plan was not found.")
     return _review_response(*result)
@@ -290,10 +286,10 @@ async def get_persisted_experiment_plan(
 async def get_experiment_plan_version_history(
     plan_id: str,
     request: Request,
+    principal: Principal = Depends(get_current_principal),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> PlanVersionHistoryResponse:
-    _reject_owner_override(request)
     runtime = request.app.state.database_runtime
     if runtime is None:
         raise HTTPException(status_code=503, detail="Plan persistence is not configured.")
@@ -306,7 +302,7 @@ async def get_experiment_plan_version_history(
         result = await list_plan_versions(
             session,
             parsed_id,
-            request.app.state.settings.local_owner_subject,
+            principal,
             offset=offset,
             limit=page_size,
         )
@@ -340,8 +336,8 @@ async def get_persisted_experiment_plan_version(
     plan_id: str,
     version_number: int,
     request: Request,
+    principal: Principal = Depends(get_current_principal),
 ) -> PlanReviewResponse:
-    _reject_owner_override(request)
     runtime = request.app.state.database_runtime
     if runtime is None:
         raise HTTPException(status_code=503, detail="Plan persistence is not configured.")
@@ -356,7 +352,7 @@ async def get_persisted_experiment_plan_version(
             session,
             parsed_id,
             version_number,
-            request.app.state.settings.local_owner_subject,
+            principal,
         )
     if result is None:
         raise HTTPException(status_code=404, detail="Experiment plan was not found.")

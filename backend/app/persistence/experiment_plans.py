@@ -16,6 +16,7 @@ from app.db.models import ExperimentPlanRecord, ExperimentPlanVersionRecord
 from app.domain.experiments.draft_models import (
     ExperimentDraftResponse, FieldProvenance, ProvenanceSource,
 )
+from app.domain.identity import Principal
 from app.domain.experiments.models import ExperimentPlanResponse, ExperimentSpecification
 
 CURRENT_HASH_FORMAT_VERSION = 1
@@ -124,7 +125,7 @@ def verify_record_hash(record: ExperimentPlanVersionRecord) -> None:
 
 async def create_plan(
     session: AsyncSession,
-    owner_subject: str,
+    principal: Principal,
     response: ExperimentPlanResponse,
     provenance: list[FieldProvenance] | None = None,
     draft: ExperimentDraftResponse | None = None,
@@ -135,7 +136,7 @@ async def create_plan(
     version = _make_version(plan_id, 1, response, provenance or [], draft, now)
     identity = ExperimentPlanRecord(
         id=plan_id,
-        owner_subject=owner_subject,
+        owner_subject=principal.subject,
         current_version=1,
         created_at=now,
     )
@@ -190,7 +191,7 @@ def manual_provenance(specification: ExperimentSpecification) -> list[FieldProve
 async def append_plan_version(
     session: AsyncSession,
     plan_id: UUID,
-    owner_subject: str,
+    principal: Principal,
     response: ExperimentPlanResponse,
     provenance: list[FieldProvenance] | None = None,
     draft: ExperimentDraftResponse | None = None,
@@ -200,7 +201,9 @@ async def append_plan_version(
         select(ExperimentPlanRecord)
         .where(
             ExperimentPlanRecord.id == plan_id,
-            ExperimentPlanRecord.owner_subject.in_((owner_subject, LEGACY_OWNER_SUBJECT)),
+            ExperimentPlanRecord.owner_subject.in_(
+                (principal.subject, LEGACY_OWNER_SUBJECT),
+            ),
         )
         .with_for_update()
     )
@@ -248,12 +251,14 @@ def _make_version(
 async def get_plan(
     session: AsyncSession,
     plan_id: UUID,
-    owner_subject: str,
+    principal: Principal,
 ) -> tuple[ExperimentPlanRecord, ExperimentPlanVersionRecord] | None:
     identity = await session.scalar(
         select(ExperimentPlanRecord).where(
             ExperimentPlanRecord.id == plan_id,
-            ExperimentPlanRecord.owner_subject.in_((owner_subject, LEGACY_OWNER_SUBJECT)),
+            ExperimentPlanRecord.owner_subject.in_(
+                (principal.subject, LEGACY_OWNER_SUBJECT),
+            ),
         )
     )
     if identity is None:
@@ -272,12 +277,14 @@ async def get_plan_version(
     session: AsyncSession,
     plan_id: UUID,
     version_number: int,
-    owner_subject: str,
+    principal: Principal,
 ) -> tuple[ExperimentPlanRecord, ExperimentPlanVersionRecord] | None:
     identity = await session.scalar(
         select(ExperimentPlanRecord).where(
             ExperimentPlanRecord.id == plan_id,
-            ExperimentPlanRecord.owner_subject.in_((owner_subject, LEGACY_OWNER_SUBJECT)),
+            ExperimentPlanRecord.owner_subject.in_(
+                (principal.subject, LEGACY_OWNER_SUBJECT),
+            ),
         )
     )
     if identity is None:
@@ -291,14 +298,14 @@ async def get_plan_version(
 
 async def list_plans(
     session: AsyncSession,
-    owner_subject: str,
+    principal: Principal,
     *,
     offset: int,
     limit: int,
 ) -> tuple[list[dict[str, Any]], int]:
     """Load and hash-verify each paginated plan's current snapshot, not historical snapshots."""
     ownership = ExperimentPlanRecord.owner_subject.in_(
-        (owner_subject, LEGACY_OWNER_SUBJECT),
+        (principal.subject, LEGACY_OWNER_SUBJECT),
     )
     total = await session.scalar(
         select(func.count()).select_from(ExperimentPlanRecord).where(ownership)
@@ -348,7 +355,7 @@ async def list_plans(
 async def list_plan_versions(
     session: AsyncSession,
     plan_id: UUID,
-    owner_subject: str,
+    principal: Principal,
     *,
     offset: int,
     limit: int,
@@ -358,7 +365,7 @@ async def list_plan_versions(
         select(ExperimentPlanRecord).where(
             ExperimentPlanRecord.id == plan_id,
             ExperimentPlanRecord.owner_subject.in_(
-                (owner_subject, LEGACY_OWNER_SUBJECT),
+                (principal.subject, LEGACY_OWNER_SUBJECT),
             ),
         )
     )

@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.domain.identity import normalize_principal_subject
+
 
 class Settings(BaseSettings):
     """Settings used by the read-only backend milestone."""
@@ -15,6 +17,7 @@ class Settings(BaseSettings):
         env_file=Path(__file__).resolve().parents[3] / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_env: str = "development"
@@ -26,7 +29,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.5-flash-lite"
     llm_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     database_url: SecretStr | None = None
-    local_owner_subject: str = Field(default="local-development", min_length=1, max_length=255)
+    local_owner_subject: str | None = None
 
     def __init__(self, **values):
         super().__init__(**values)
@@ -65,13 +68,17 @@ class Settings(BaseSettings):
             raise ValueError("FLAGSMITH_API_URL must use HTTPS (HTTP is allowed only for localhost)")
         return value
 
-    @field_validator("local_owner_subject")
+    @field_validator("local_owner_subject", mode="before")
     @classmethod
-    def validate_local_owner_subject(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("LOCAL_OWNER_SUBJECT cannot be blank")
-        return value
+    def validate_local_owner_subject(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        try:
+            return normalize_principal_subject(value)
+        except ValueError:
+            raise ValueError(
+                "LOCAL_OWNER_SUBJECT must be a non-empty printable subject of at most 255 characters."
+            ) from None
 
 
 @lru_cache

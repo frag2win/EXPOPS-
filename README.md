@@ -143,9 +143,18 @@ creates an async SQLAlchemy engine during application lifespan and exposes
 `GET /health/database`; existing M1–M3 endpoints do not require PostgreSQL.
 M4.2 stores stable plan identities separately from immutable version
 snapshots. Apply migrations before using persistence routes. Set the
-server-side `LOCAL_OWNER_SUBJECT` (default `local-development`) to select the
-local principal; clients cannot choose an owner. Snapshot retrieval verifies a
-versioned canonical SHA-256 hash. The dedicated `POST
+server-side `LOCAL_OWNER_SUBJECT` to select the local principal (the example
+configuration uses `local-development`); set it explicitly in the server
+environment before using persisted-plan routes. The subject is trimmed and
+validated as printable text of at most 255 characters; missing or invalid
+configuration fails closed with a sanitized service-unavailable response.
+The authenticated principal is
+resolved once through a shared server-side dependency. Client bodies,
+query parameters, and headers cannot select or override it. All persisted
+plan creation, listing, current reads, history reads, and exact-version reads
+are scoped to this principal. This identity abstraction is the foundation for
+future auditable decisions, but this milestone adds no approval behavior.
+Snapshot retrieval verifies a versioned canonical SHA-256 hash. The dedicated `POST
 /api/v1/experiments/drafts` workflow invokes the server-side drafting agent
 and persists its complete generated envelope and provenance; the existing
 `POST /api/v1/experiments/draft` remains ephemeral. Plan versions are protected
@@ -245,8 +254,9 @@ listed current snapshot; it does not fetch historical snapshots. Detail and
 exact-version responses include the specification, plan, validation,
 provenance, blocking reasons, missing information, and verified integrity
 status. Version history is ordered by descending version number and verifies
-each returned snapshot. Read endpoints derive ownership from
-`LOCAL_OWNER_SUBJECT`; a supplied `owner_subject` query parameter is rejected.
+each returned snapshot. read endpoints derive ownership from the required `LOCAL_OWNER_SUBJECT`;
+`owner_subject` query overrides are rejected, body fields are forbidden by
+request schemas, and identity headers are ignored.
 
 Environment identifiers returned by ExperimentOps are Flagsmith UUIDs;
 the upstream environment API key is never returned. The `/flags` endpoint
