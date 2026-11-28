@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.routes import router
 from app.api.experiment_routes import router as experiment_router
@@ -18,6 +19,7 @@ from app.integrations.flagsmith.adapter import FlagsmithAdapter
 from app.integrations.flagsmith.client import FlagsmithClient
 from app.integrations.flagsmith.exceptions import FlagsmithError
 from app.llm.errors import GeminiProviderError, LLMError
+from app.persistence.experiment_plans import PlanIntegrityError
 
 logger = logging.getLogger("experimentops")
 
@@ -90,6 +92,36 @@ def create_app(settings: Settings | None = None, adapter: FlagsmithAdapter | Non
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": error, "request_id": request_id},
+        )
+
+    @application.exception_handler(SQLAlchemyError)
+    async def database_error_handler(request: Request, _exc: SQLAlchemyError) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.warning("Database operation failed", extra={"request_id": request_id})
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "code": "DATABASE_OPERATION_FAILED",
+                    "message": "The database operation could not be completed.",
+                },
+                "request_id": request_id,
+            },
+        )
+
+    @application.exception_handler(PlanIntegrityError)
+    async def plan_integrity_error_handler(request: Request, _exc: PlanIntegrityError) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.error("Persisted plan integrity verification failed", extra={"request_id": request_id})
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": "PLAN_INTEGRITY_FAILED",
+                    "message": "Stored plan integrity verification failed.",
+                },
+                "request_id": request_id,
+            },
         )
 
     @application.exception_handler(RequestValidationError)

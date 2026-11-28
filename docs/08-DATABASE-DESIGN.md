@@ -1,11 +1,12 @@
 # 08 --- Database Design
 
-**Version:** 0.1
+**Version:** 0.2
 
-> **M4.1 implementation status (2026-11-28):** PostgreSQL configuration,
+> **M4.3 implementation status (2026-11-28):** PostgreSQL configuration,
 > async SQLAlchemy runtime, safe database readiness, and Alembic infrastructure
-> are implemented. The baseline migration is empty. Plan, approval, execution,
-> and audit tables below remain proposed and have not been created.
+> are implemented. M4.2 uses stable plan identities plus immutable,
+> provenance-preserving versions; M4.3 adds read-only plan review. Approval,
+> execution, and audit tables remain proposed and have not been created.
 
 ## 1. Design principles
 
@@ -67,18 +68,20 @@ Put the corresponding URL only in the ignored repository-root `.env`. Do not
 place real credentials in the template or documentation. The database health
 check does not create tables or run migrations.
 
-The optional PostgreSQL integration test runs only when
+The optional PostgreSQL integration tests run only when
 `EXPOPS_POSTGRES_INTEGRATION=1` and `TEST_DATABASE_URL` are explicitly set. Use
 a dedicated local test database; its URL shape is
-`postgresql+psycopg://<user>:<password>@localhost:5432/<test_db>`. The test
-checks connectivity and transaction rollback using a temporary table, then
-disposes the engine. It creates no persistent application tables. The test
-runner selects a compatible event loop for the test itself; this does not
-replace the separate Windows application launcher check.
+`postgresql+psycopg://<user>:<password>@localhost:5432/<test_db>`. They upgrade
+the schema and verify actual plan creation, hash/provenance retrieval, owner
+isolation, trigger rejection of direct snapshot updates/deletes, version
+preservation, concurrent allocation, and rollback. The test runner selects
+the Selector event loop for database async operations; this does not replace
+the separate Windows application launcher check. A skipped integration test
+is not evidence of PostgreSQL compatibility.
 
 ## 2. Proposed core entities (not implemented)
 
-The following tables remain design targets. M4.1 creates none of them.
+The following tables remain design targets unless marked implemented.
 
 ### `users`
 
@@ -109,23 +112,74 @@ Fields: - `id` UUID primary key - `email` nullable - `created_at`
 -   `environment_name`
 -   `created_at`
 
-### `experiment_plans`
+### `experiment_plans` and `experiment_plan_versions` (implemented in M4.2)
 
--   `id` UUID
--   `owner_user_id`
--   `connection_id`
--   `project_id`
--   `environment_id`
--   `version` integer
--   `status`
--   `prompt_redacted`
--   `normalized_brief` JSONB
--   `plan_json` JSONB
--   `plan_hash`
--   `validation_json` JSONB
--   `created_at`
--   `updated_at`
--   `expires_at`
+`experiment_plans` stores a stable UUID, server-configured `owner_subject`,
+the mutable `current_version` pointer, and `created_at`.
+`experiment_plan_versions` stores immutable `(plan_id, version)` snapshots:
+`specification_json`, `plan_json`, `validation_json`, `provenance_json`,
+optional `draft_json`, `content_hash`, `hash_format_version`, `created_at`,
+and nullable `legacy_*` fields used only to preserve project/environment IDs,
+status, and update timestamp from the prior schema during upgrade.
+
+The version table has a composite primary key and a restrictive foreign key
+to its parent. The parent pointer has a deferred composite foreign key to a
+version row. A PostgreSQL `BEFORE UPDATE OR DELETE` trigger rejects all
+mutations to version rows. Version creation locks the parent row with
+`SELECT ... FOR UPDATE`, then advances its pointer in the same transaction.
+
+Hash format 1 canonicalizes specification, plan, validation, provenance, and
+the optional complete server-generated draft envelope, then computes SHA-256.
+Database identifiers, timestamps, parent pointers, and raw prompts are
+excluded. Retrieval recomputes and compares the digest. Format 0 verifies
+prior M4.2 records using their original response hash format. Legacy rows
+become one plan identity each, preserving their UUID and version number.
+Because the previous schema did not record an owner, migrated identities use
+the reserved `__legacy_local__` owner marker; repository scoping treats those
+rows as belonging to the currently configured single local principal. Thus a
+change to `LOCAL_OWNER_SUBJECT` does not strand legacy plans. Provenance is
+empty because it was not stored, and the old `updated_at` is retained in
+`legacy_updated_at`; the old project/environment IDs and status are also kept
+in legacy columns. The upgrade verifies row counts before dropping the
+renamed source table. This migration is forward-only because downgrade would
+discard owner/provenance data.
+
+`LOCAL_OWNER_SUBJECT` configures the local principal (default
+`local-development`). Client request bodies cannot set it. Manual persistence
+is available at `POST /api/v1/experiments/plans`; a new immutable version can
+be appended at `POST /api/v1/experiments/plans/{plan_id}/versions`. Current
+and exact-version retrieval are available at `GET
+/api/v1/experiments/plans/{plan_id}` and `GET
+/api/v1/experiments/plans/{plan_id}/versions/{version_number}`. Server-side
+Gemini draft persistence uses `POST /api/v1/experiments/drafts`; the existing
+ephemeral `POST /api/v1/experiments/draft` is unchanged. No approval,
+rejection, or execution operations are part of M4.2.
+
+M4.3 exposes read-only review operations:
+
+- `GET /api/v1/experiments/plans?page=1&page_size=20` lists plans for the
+  configured local principal. Pagination is database-level, ordered by
+  `created_at DESC, id DESC`, with a default page size of 20 and maximum of 100.
+  The query joins and verifies only each plan's current version; it does not
+  load historical snapshots. Each item reports
+  `integrity_status: "verified"` only after its current snapshot hash passes.
+- `GET /api/v1/experiments/plans/{plan_id}` returns the current review snapshot,
+  specification summary, validation readiness and blockers, provenance
+  summary, and full stored specification/plan/validation/provenance values.
+- `GET /api/v1/experiments/plans/{plan_id}/versions?page=1&page_size=20`
+  returns a descending-version history page. Every returned snapshot is
+  integrity-verified before its hash, readiness, provenance counts, and
+  `integrity_status: "verified"` are returned.
+- `GET /api/v1/experiments/plans/{plan_id}/versions/{version_number}` returns
+  and verifies that exact historical snapshot, including specification,
+  plan, validation, and provenance.
+
+Detail and history operations use the existing versioned canonical SHA-256
+verification. A mismatch or unsupported hash format fails with the sanitized
+`PLAN_INTEGRITY_FAILED` response; corrupted snapshots are neither repaired nor
+served as verified. `owner_subject` query overrides are rejected, and absent
+or foreign-owned plan IDs share the same not-found response. No review route
+changes plan state or calls the drafting agent.
 
 ### `approvals`
 

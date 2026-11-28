@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.5-flash-lite"
     llm_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     database_url: SecretStr | None = None
+    local_owner_subject: str = Field(default="local-development", min_length=1, max_length=255)
 
     def __init__(self, **values):
         super().__init__(**values)
@@ -62,6 +63,14 @@ class Settings(BaseSettings):
         value = value.rstrip("/")
         if not value.startswith(("https://", "http://localhost", "http://127.0.0.1")):
             raise ValueError("FLAGSMITH_API_URL must use HTTPS (HTTP is allowed only for localhost)")
+        return value
+
+    @field_validator("local_owner_subject")
+    @classmethod
+    def validate_local_owner_subject(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("LOCAL_OWNER_SUBJECT cannot be blank")
         return value
 
 

@@ -10,9 +10,9 @@ Flagsmith. Current implementation also offers an optional AI-assisted draft;
 the implemented workflow still stops before approval and execution.
 
 > **Project status:** Milestones 1 and 2, plus Milestone 3 AI-assisted
-> specification drafting, are implemented. Drafts are ephemeral and require
-> user review. There is no approval workflow, Flagsmith write, execution,
-> database persistence, or frontend.
+> specification drafting, M4.2 immutable plan persistence, and M4.3 read-only
+> plan review are implemented. Drafts remain subject to user review. There is
+> no approval workflow, Flagsmith write, execution, or frontend.
 
 ## The problem
 
@@ -141,8 +141,27 @@ The template's `DATABASE_URL` uses the PostgreSQL Psycopg 3 driver and explicit
 placeholders. Database configuration is optional. When configured, M4.1
 creates an async SQLAlchemy engine during application lifespan and exposes
 `GET /health/database`; existing M1–M3 endpoints do not require PostgreSQL.
-The Alembic baseline is empty: plan persistence, approval, and audit tables
-are not implemented. Put real local credentials only in the ignored root
+M4.2 stores stable plan identities separately from immutable version
+snapshots. Apply migrations before using persistence routes. Set the
+server-side `LOCAL_OWNER_SUBJECT` (default `local-development`) to select the
+local principal; clients cannot choose an owner. Snapshot retrieval verifies a
+versioned canonical SHA-256 hash. The dedicated `POST
+/api/v1/experiments/drafts` workflow invokes the server-side drafting agent
+and persists its complete generated envelope and provenance; the existing
+`POST /api/v1/experiments/draft` remains ephemeral. Plan versions are protected
+against database `UPDATE` and `DELETE` by a PostgreSQL trigger. No persistence
+route approves, rejects, executes, or modifies Flagsmith resources.
+Migrated ownerless legacy records retain a reserved local marker and remain
+visible to the active configured local principal after principal changes.
+M4.3 adds a paginated, read-only plan list, current-plan review, and paginated
+version history. List summaries are selected from each paginated current row;
+their hashes are verified without loading historical snapshots. Current-plan,
+history-page, and exact-version reads also recompute and verify stored hashes.
+These responses report `integrity_status: "verified"` only after verification.
+Integrity failures return a sanitized `PLAN_INTEGRITY_FAILED` response. List
+and history pagination use `page` (default `1`) and `page_size` (default `20`,
+maximum `100`). No review endpoint changes plan state.
+Put real local credentials only in the ignored root
 `.env`, never in `.env.example` or documentation. See
 [`docs/08-DATABASE-DESIGN.md`](docs/08-DATABASE-DESIGN.md) for setup and
 migration commands.
@@ -203,7 +222,31 @@ routes:
 - `GET /api/v1/experiments/health`
 - `POST /api/v1/experiments/validate`
 - `POST /api/v1/experiments/plan`
+- `POST /api/v1/experiments/plans`
+- `POST /api/v1/experiments/plans/{plan_id}/versions`
+- `GET /api/v1/experiments/plans?page=1&page_size=20`
+- `GET /api/v1/experiments/plans/{plan_id}`
+- `GET /api/v1/experiments/plans/{plan_id}/versions?page=1&page_size=20`
+- `GET /api/v1/experiments/plans/{plan_id}/versions/{version_number}`
 - `POST /api/v1/experiments/draft`
+- `POST /api/v1/experiments/drafts`
+
+Example review requests:
+
+```text
+GET /api/v1/experiments/plans?page=1&page_size=20
+GET /api/v1/experiments/plans/PLAN_UUID
+GET /api/v1/experiments/plans/PLAN_UUID/versions?page=1&page_size=20
+GET /api/v1/experiments/plans/PLAN_UUID/versions/1
+```
+
+The list response contains compact current-version metadata and verifies each
+listed current snapshot; it does not fetch historical snapshots. Detail and
+exact-version responses include the specification, plan, validation,
+provenance, blocking reasons, missing information, and verified integrity
+status. Version history is ordered by descending version number and verifies
+each returned snapshot. Read endpoints derive ownership from
+`LOCAL_OWNER_SUBJECT`; a supplied `owner_subject` query parameter is rejected.
 
 Environment identifiers returned by ExperimentOps are Flagsmith UUIDs;
 the upstream environment API key is never returned. The `/flags` endpoint

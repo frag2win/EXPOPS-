@@ -218,10 +218,11 @@ def test_configured_database_runtime_lifecycle(monkeypatch):
     assert engine.disposed
 
 
-def test_alembic_metadata_has_no_business_tables():
+def test_alembic_metadata_includes_experiment_plan_table():
     from app.db.base import Base
 
-    assert dict(Base.metadata.tables) == {}
+    assert "experiment_plans" in Base.metadata.tables
+    assert "experiment_plan_versions" in Base.metadata.tables
 
 
 def test_platform_database_runner_runs_and_closes_its_loop():
