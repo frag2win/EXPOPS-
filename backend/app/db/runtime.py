@@ -27,6 +27,7 @@ def create_database_runtime(database_url: SecretStr) -> DatabaseRuntime:
     try:
         engine = create_async_engine(
             database_url.get_secret_value(),
+            isolation_level="READ COMMITTED",
             pool_size=5,
             max_overflow=5,
             pool_timeout=10,

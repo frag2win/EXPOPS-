@@ -143,8 +143,29 @@ def validate_experiment(spec: ExperimentSpecification, prerequisites: Prerequisi
     prerequisite("project", prerequisites.project_status, "Flagsmith Management API", prerequisites.project_message, prerequisites.project.name if prerequisites.project else None)
     prerequisite("environment", prerequisites.environment_status, "Flagsmith Management API", prerequisites.environment_message, prerequisites.environment.name if prerequisites.environment else None)
     prerequisite("feature", prerequisites.feature_status, "Flagsmith project feature catalog", prerequisites.feature_message, prerequisites.feature.name if prerequisites.feature else None)
-    prerequisite("feature_experiment_support", prerequisites.feature_experiment_status, "Flagsmith multivariate feature options", prerequisites.feature_experiment_message)
-    prerequisite("warehouse", prerequisites.warehouse_status, "No verified warehouse integration", prerequisites.warehouse_message)
+    feature_experiment_evidence = None
+    if prerequisites.feature and prerequisites.feature.multivariate_options:
+        feature_experiment_evidence = ", ".join(
+            sorted(
+                option.key
+                for option in prerequisites.feature.multivariate_options
+                if option.key
+            )
+        ) or None
+    prerequisite(
+        "feature_experiment_support",
+        prerequisites.feature_experiment_status,
+        "Flagsmith multivariate feature options",
+        prerequisites.feature_experiment_message,
+        feature_experiment_evidence,
+    )
+    prerequisite(
+        "warehouse",
+        prerequisites.warehouse_status,
+        "No verified warehouse integration",
+        prerequisites.warehouse_message,
+        prerequisites.warehouse_evidence,
+    )
 
     if prerequisites.feature and prerequisites.feature_status == ReadinessStatus.AVAILABLE:
         options = prerequisites.feature.multivariate_options

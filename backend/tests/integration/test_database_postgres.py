@@ -25,12 +25,29 @@ from app.domain.experiments.draft_models import (
 )
 from app.domain.experiments.models import (
     ExperimentPlan, ExperimentPlanResponse, ExperimentSpecification,
-    ExternalPrerequisite, PlanReadiness, ReadinessStatus, ValidationReport,
+    ExternalPrerequisite, PlanReadiness, PrerequisiteSnapshot, ReadinessStatus,
+    ResolvedEnvironment, ResolvedFeature, ResolvedProject, ResolvedVariantOption,
+    ValidationReport,
+)
+from app.domain.experiments.validator import validate_experiment
+from app.domain.experiments.decision_models import (
+    DecisionType,
 )
 from app.domain.identity import Principal
 from app.persistence.experiment_plans import (
     LEGACY_OWNER_SUBJECT, PlanIntegrityError, append_plan_version, create_plan,
     get_plan, get_plan_version, list_plans,
+)
+from app.persistence.experiment_decisions import (
+    DecisionConflictError,
+    DecisionIdempotencyConflictError,
+    build_revalidation_snapshot,
+    get_idempotent_decision,
+    get_owned_plan_version,
+    get_plan_decision,
+    get_plan_decisions,
+    record_plan_decision,
+    rejection_revalidation_snapshot,
 )
 from app.main import create_app
 from app.llm.protocols import GenerationUsage, StructuredGeneration
@@ -59,6 +76,8 @@ async def _verify_postgresql_connectivity_and_transaction_rollback():
         async with runtime.session_factory() as session:
             async with session.begin():
                 await session.execute(text("SELECT 1"))
+                isolation = await session.scalar(text("SHOW transaction_isolation"))
+                assert isolation == "read committed"
             with pytest.raises(RuntimeError):
                 async with session.begin():
                     await session.execute(text(f'CREATE TEMP TABLE "{table_name}" (id integer)'))
@@ -338,6 +357,7 @@ async def _verify_postgresql_plan_persistence(database_url: str):
 
         await _verify_draft_api_round_trip(runtime, database_url, owner)
         await _verify_corruption_detection(runtime, owner)
+        await _verify_postgresql_decisions(runtime, owner)
     finally:
         await runtime.dispose()
 
@@ -376,6 +396,397 @@ async def _verify_corruption_detection(runtime, owner: str):
                     await list_plans(
                         session, _principal(owner), offset=0, limit=20,
                     )
+
+
+async def _verify_postgresql_decisions(runtime, owner: str):
+    principal = _principal(owner)
+    async with transaction_scope(runtime.session_factory) as session:
+        identity, version = await create_plan(
+            session,
+            principal,
+            _planning_snapshot("decision persistence"),
+        )
+
+    async with runtime.session_factory() as session:
+        async with session.begin():
+            assert await get_owned_plan_version(
+                session, identity.id, 1, principal,
+            ) is not None
+            foreign = _principal(f"{owner}-foreign")
+            assert await get_owned_plan_version(
+                session, identity.id, 1, foreign,
+            ) is None
+            assert await get_plan_decisions(
+                session, identity.id, foreign, offset=0, limit=20,
+            ) is None
+            assert await get_plan_decision(
+                session, identity.id, uuid4(), foreign,
+            ) is None
+
+    async with transaction_scope(runtime.session_factory) as session:
+        assert await append_plan_version(
+            session,
+            identity.id,
+            _principal(f"{owner}-foreign"),
+            _planning_snapshot("foreign append"),
+        ) is None
+
+    rejection = rejection_revalidation_snapshot(
+        identity.id,
+        version.version,
+        version.content_hash,
+    )
+    saved, was_idempotent = await record_plan_decision(
+        runtime.session_factory,
+        principal=principal,
+        plan_id=identity.id,
+        plan_version=version.version,
+        content_hash=version.content_hash,
+        decision_type=DecisionType.REJECTED,
+        idempotency_key="pg-rejection-1",
+        revalidation=rejection,
+        rejection_reason="Evidence is incomplete.",
+    )
+    assert not was_idempotent
+    replay, was_idempotent = await record_plan_decision(
+        runtime.session_factory,
+        principal=principal,
+        plan_id=identity.id,
+        plan_version=version.version,
+        content_hash=version.content_hash,
+        decision_type=DecisionType.REJECTED,
+        idempotency_key="pg-rejection-1",
+        revalidation=rejection,
+        rejection_reason="Evidence is incomplete.",
+    )
+    assert was_idempotent and replay.id == saved.id
+    async with runtime.session_factory() as session:
+        async with session.begin():
+            own_history = await get_plan_decisions(
+                session, identity.id, principal, offset=0, limit=20,
+            )
+            assert own_history is not None
+            assert len(own_history[0]) == own_history[1] == 1
+            assert own_history[0][0].audit.idempotency_reference
+            assert (await get_plan_decision(
+                session, identity.id, saved.id, principal,
+            )).id == saved.id
+            assert await get_idempotent_decision(
+                session,
+                principal,
+                "pg-rejection-1",
+                saved.audit.metadata["request_hash"],
+            ) is not None
+            with pytest.raises(DecisionIdempotencyConflictError):
+                await get_idempotent_decision(
+                    session,
+                    principal,
+                    "pg-rejection-1",
+                    "0" * 64,
+                )
+
+    with pytest.raises(DecisionConflictError):
+        await record_plan_decision(
+            runtime.session_factory,
+            principal=principal,
+            plan_id=identity.id,
+            plan_version=version.version,
+            content_hash=version.content_hash,
+            decision_type=DecisionType.REJECTED,
+            idempotency_key="pg-rejection-2",
+            revalidation=rejection,
+            rejection_reason="Different reason.",
+        )
+
+    async with transaction_scope(runtime.session_factory) as session:
+        concurrent_identity, concurrent_version = await create_plan(
+            session,
+            principal,
+            _planning_snapshot("concurrent decision"),
+        )
+    concurrent_revalidation = rejection_revalidation_snapshot(
+        concurrent_identity.id,
+        concurrent_version.version,
+        concurrent_version.content_hash,
+    )
+
+    async def submit_same_decision():
+        return await record_plan_decision(
+            runtime.session_factory,
+            principal=principal,
+            plan_id=concurrent_identity.id,
+            plan_version=concurrent_version.version,
+            content_hash=concurrent_version.content_hash,
+            decision_type=DecisionType.REJECTED,
+            idempotency_key="pg-concurrent-idempotency",
+            revalidation=concurrent_revalidation,
+            rejection_reason="Concurrent retry.",
+        )
+
+    concurrent_results = await asyncio.gather(
+        submit_same_decision(),
+        submit_same_decision(),
+    )
+    assert len({result[0].id for result in concurrent_results}) == 1
+    assert sorted(result[1] for result in concurrent_results) == [False, True]
+
+    approval_specification = ExperimentSpecification.model_validate({
+        "name": "PostgreSQL approval test",
+        "description": "A fully specified test-only plan.",
+        "hypothesis": "A stable variant improves purchases.",
+        "project": "project-id",
+        "environment": "environment-id",
+        "feature_key": "checkout_simplified",
+        "variants": [
+            {"key": "control", "role": "control", "value": False, "allocation": "70"},
+            {"key": "simplified", "role": "treatment", "value": True, "allocation": "30"},
+        ],
+        "primary_metric": {
+            "name": "Purchases",
+            "event_name": "purchase_completed",
+            "aggregation": "occurrence",
+            "direction": "up",
+        },
+        "instrumentation": {
+            "sdk_readiness": "ready",
+            "sdk_evidence": "Integration test fixture",
+            "exposure_identity_strategy": "stable_user_id",
+            "conversion_identity_strategy": "stable_user_id",
+            "exposure_event_requirement": "Emit assignment exposure",
+            "conversion_event_name": "purchase_completed",
+        },
+    })
+    approval_prerequisites = PrerequisiteSnapshot(
+        project_status=ReadinessStatus.AVAILABLE,
+        project_message="Test-only verified project.",
+        project=ResolvedProject(id="project-id", name="Test project"),
+        environment_status=ReadinessStatus.AVAILABLE,
+        environment_message="Test-only verified environment.",
+        environment=ResolvedEnvironment(
+            id="environment-id",
+            name="Test environment",
+            project_id="project-id",
+        ),
+        feature_status=ReadinessStatus.AVAILABLE,
+        feature_message="Test-only verified feature.",
+        feature=ResolvedFeature(
+            id="feature-id",
+            name="checkout_simplified",
+            feature_type="MULTIVARIATE",
+            multivariate_options=[
+                ResolvedVariantOption(
+                    id="option-control",
+                    key="control",
+                    value_type="boolean",
+                    value=False,
+                ),
+                ResolvedVariantOption(
+                    id="option-simplified",
+                    key="simplified",
+                    value_type="boolean",
+                    value=True,
+                ),
+            ],
+        ),
+        feature_experiment_status=ReadinessStatus.AVAILABLE,
+        feature_experiment_message="Test-only keyed options.",
+        warehouse_status=ReadinessStatus.AVAILABLE,
+        warehouse_message="Test-only verified warehouse fixture.",
+        warehouse_evidence="Test-only warehouse evidence.",
+    )
+    approval_report = validate_experiment(
+        approval_specification,
+        approval_prerequisites,
+    )
+    assert approval_report.overall_status == PlanReadiness.READY_FOR_REVIEW
+    approval_plan = ExperimentPlanResponse(
+        plan=ExperimentPlan(
+            summary="Persisted test-only approval proposal.",
+            specification=approval_specification,
+        ),
+        validation=approval_report,
+    )
+    async with transaction_scope(runtime.session_factory) as session:
+        approval_identity, approval_version = await create_plan(
+            session,
+            principal,
+            approval_plan,
+        )
+    approval_revalidation = build_revalidation_snapshot(
+        approval_identity.id,
+        approval_version.version,
+        approval_version.content_hash,
+        approval_report,
+    )
+    assert approval_revalidation.outcome.value == "PASSED"
+    approved, was_idempotent = await record_plan_decision(
+        runtime.session_factory,
+        principal=principal,
+        plan_id=approval_identity.id,
+        plan_version=approval_version.version,
+        content_hash=approval_version.content_hash,
+        decision_type=DecisionType.APPROVED,
+        idempotency_key="pg-approval-1",
+        revalidation=approval_revalidation,
+    )
+    assert not was_idempotent
+    async with runtime.session_factory() as session:
+        async with session.begin():
+            approval_history = await get_plan_decisions(
+                session,
+                approval_identity.id,
+                principal,
+                offset=0,
+                limit=20,
+            )
+            assert approval_history is not None
+            assert approval_history[0][0].id == approved.id
+            assert approval_history[0][0].revalidation.outcome.value == "PASSED"
+
+    immutable_attempts = (
+        (
+            "UPDATE experiment_plan_decisions SET rejection_reason = 'mutated' WHERE id = :id",
+            {"id": saved.id},
+        ),
+        (
+            "DELETE FROM experiment_plan_decisions WHERE id = :id",
+            {"id": saved.id},
+        ),
+        (
+            "UPDATE experiment_plan_decision_audit SET actor_subject = 'mutated' WHERE decision_id = :id",
+            {"id": saved.id},
+        ),
+        (
+            "DELETE FROM experiment_plan_decision_audit WHERE decision_id = :id",
+            {"id": saved.id},
+        ),
+    )
+    for statement, parameters in immutable_attempts:
+        with pytest.raises(DBAPIError):
+            async with runtime.session_factory() as session:
+                async with session.begin():
+                    await session.execute(text(statement), parameters)
+
+    async with runtime.engine.begin() as connection:
+        await connection.execute(text(
+            "ALTER TABLE experiment_plan_decision_audit "
+            "DISABLE TRIGGER experiment_plan_decision_audit_immutable"
+        ))
+        await connection.execute(
+            text(
+                """
+                UPDATE experiment_plan_decision_audit
+                SET metadata_json = jsonb_set(metadata_json, '{schema_version}', '2'::jsonb)
+                WHERE decision_id = :decision_id
+                """
+            ),
+            {"decision_id": saved.id},
+        )
+        await connection.execute(text(
+            "ALTER TABLE experiment_plan_decision_audit "
+            "ENABLE TRIGGER experiment_plan_decision_audit_immutable"
+        ))
+    with pytest.raises(PlanIntegrityError):
+        async with runtime.session_factory() as session:
+            async with session.begin():
+                await get_plan_decision(
+                    session,
+                    identity.id,
+                    saved.id,
+                    principal,
+                )
+
+    async with runtime.engine.begin() as connection:
+        await connection.execute(text(
+            "ALTER TABLE experiment_plan_decision_audit "
+            "DISABLE TRIGGER experiment_plan_decision_audit_immutable"
+        ))
+        await connection.execute(
+            text(
+                "DELETE FROM experiment_plan_decision_audit "
+                "WHERE decision_id = :decision_id"
+            ),
+            {"decision_id": saved.id},
+        )
+        await connection.execute(text(
+            "ALTER TABLE experiment_plan_decision_audit "
+            "ENABLE TRIGGER experiment_plan_decision_audit_immutable"
+        ))
+    with pytest.raises(PlanIntegrityError):
+        async with runtime.session_factory() as session:
+            async with session.begin():
+                await get_plan_decision(
+                    session,
+                    identity.id,
+                    saved.id,
+                    principal,
+                )
+
+    rollback_identity = None
+    async with transaction_scope(runtime.session_factory) as session:
+        rollback_identity, rollback_version = await create_plan(
+            session,
+            principal,
+            _planning_snapshot("audit rollback"),
+        )
+    rollback_revalidation = rejection_revalidation_snapshot(
+        rollback_identity.id,
+        rollback_version.version,
+        rollback_version.content_hash,
+    )
+    suffix = uuid4().hex
+    function_name = f"test_fail_plan_decision_audit_{suffix}"
+    trigger_name = f"test_fail_plan_decision_audit_{suffix}"
+    async with runtime.engine.begin() as connection:
+        await connection.execute(text(
+            f"""
+            CREATE FUNCTION {function_name}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                RAISE EXCEPTION 'injected audit failure';
+            END;
+            $$;
+            """
+        ))
+        await connection.execute(text(
+            f"""
+            CREATE TRIGGER {trigger_name}
+            BEFORE INSERT ON experiment_plan_decision_audit
+            FOR EACH ROW EXECUTE FUNCTION {function_name}();
+            """
+        ))
+    try:
+        with pytest.raises(DBAPIError):
+            await record_plan_decision(
+                runtime.session_factory,
+                principal=principal,
+                plan_id=rollback_identity.id,
+                plan_version=rollback_version.version,
+                content_hash=rollback_version.content_hash,
+                decision_type=DecisionType.REJECTED,
+                idempotency_key="pg-audit-failure",
+                revalidation=rollback_revalidation,
+                rejection_reason="The audit insert must fail.",
+            )
+    finally:
+        async with runtime.engine.begin() as connection:
+            await connection.execute(text(
+                f"DROP TRIGGER {trigger_name} ON experiment_plan_decision_audit"
+            ))
+            await connection.execute(text(f"DROP FUNCTION {function_name}()"))
+    async with runtime.session_factory() as session:
+        async with session.begin():
+            decision_count = await session.scalar(
+                text("SELECT count(*) FROM experiment_plan_decisions WHERE plan_id = :id"),
+                {"id": rollback_identity.id},
+            )
+            audit_count = await session.scalar(
+                text("SELECT count(*) FROM experiment_plan_decision_audit WHERE plan_id = :id"),
+                {"id": rollback_identity.id},
+            )
+            assert decision_count == audit_count == 0
 
 
 async def _verify_draft_api_round_trip(runtime, database_url: str, owner: str):

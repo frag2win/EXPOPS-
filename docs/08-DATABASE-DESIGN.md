@@ -2,11 +2,10 @@
 
 **Version:** 0.2
 
-> **M4.3 implementation status (2026-11-28):** PostgreSQL configuration,
-> async SQLAlchemy runtime, safe database readiness, and Alembic infrastructure
-> are implemented. M4.2 uses stable plan identities plus immutable,
-> provenance-preserving versions; M4.3 adds read-only plan review. Approval,
-> execution, and audit tables remain proposed and have not been created.
+> **M4.5 implementation status:** PostgreSQL configuration, async SQLAlchemy
+> runtime, Alembic infrastructure, immutable plan versions, read-only review,
+> local identity, and immutable approval/rejection decisions with audit records
+> are implemented. Experiment execution and Flagsmith writes remain disabled.
 
 ## 1. Design principles
 
@@ -158,16 +157,15 @@ All persisted operations pass this principal explicitly to the persistence
 service: creation stores its subject, and plan listing, current retrieval,
 version history, exact-version retrieval, and version append are owner-scoped.
 Missing and foreign-owned plan identifiers have the same not-found response.
-This abstraction is suitable for future auditable approval/rejection decisions,
-but no decision or execution behavior is implemented here. Manual persistence
-is available at `POST /api/v1/experiments/plans`; a new immutable version can
+Manual persistence is available at `POST /api/v1/experiments/plans`; a new immutable version can
 be appended at `POST /api/v1/experiments/plans/{plan_id}/versions`. Current
 and exact-version retrieval are available at `GET
 /api/v1/experiments/plans/{plan_id}` and `GET
 /api/v1/experiments/plans/{plan_id}/versions/{version_number}`. Server-side
 Gemini draft persistence uses `POST /api/v1/experiments/drafts`; the existing
-ephemeral `POST /api/v1/experiments/draft` is unchanged. No approval,
-rejection, or execution operations are part of M4.2.
+ephemeral `POST /api/v1/experiments/draft` is unchanged. M4.2 itself added no
+decision operations; M4.5 now provides the exact-version decision workflow
+described below.
 
 M4.3 exposes read-only review operations:
 
@@ -195,19 +193,50 @@ served as verified. `owner_subject` query overrides are rejected, and absent
 or foreign-owned plan IDs share the same not-found response. No review route
 changes plan state or calls the drafting agent.
 
-### `approvals`
+M4.5 adds server-controlled, exact-version human decisions:
 
--   `id` UUID
--   `plan_id`
--   `plan_version`
--   `plan_hash`
--   `approved_by`
--   `decision` (`approved` / `rejected`)
--   `reason` nullable
--   `created_at`
--   `expires_at`
+- `POST /api/v1/experiments/plans/{plan_id}/versions/{version_number}/approve`
+  reruns deterministic validation against the stored specification and current
+  read-only Flagsmith data. It records an approval only when readiness is
+  `READY_FOR_REVIEW`, validation has no blockers, and all required external
+  prerequisites have nonblank evidence, are independently verified, and are
+  `AVAILABLE`. Revalidation expires after 60 seconds; stale results are
+  rejected. Unknown or missing readiness fails closed. The built-in warehouse inspector currently reports `UNKNOWN`,
+  so approvals are blocked until verified warehouse readiness is available.
+- `POST /api/v1/experiments/plans/{plan_id}/versions/{version_number}/reject`
+  records a nonblank reason against the exact current version without running
+  approval revalidation.
+- `GET /api/v1/experiments/plans/{plan_id}/decisions` returns paginated
+  decision history; `GET
+  /api/v1/experiments/plans/{plan_id}/decisions/{decision_id}` returns one
+  decision and its audit record. Both endpoints are owner-scoped and verify
+  the stored decision, audit, and plan-version relationship.
 
-### `executions`
+`experiment_plan_decisions` stores one decision per `(plan_id, plan_version)`,
+the acting local principal, the immutable plan content hash, the rejection
+reason when present, a canonical request fingerprint, an opaque idempotency
+key, and the complete deterministic revalidation evidence. A repeated request
+with the same principal, idempotency key, and payload returns the original
+decision. Reusing the key for a different request or submitting a second
+decision for a decided version returns a conflict.
+
+`experiment_plan_decision_audit` records the actor, event type, exact version
+and content hash, revalidation outcome, rejection reason, and idempotency
+reference. Decision and audit rows are inserted in one explicit transaction.
+PostgreSQL constraints enforce exact-version and audit references, one decision
+per version, idempotency uniqueness, and allowed decision payloads. An
+initially deferred constraint trigger requires an audit row before a decision
+transaction can commit. Triggers reject `UPDATE` and `DELETE` on both tables.
+The application re-verifies the linked plan snapshot hash and audit fields on
+decision reads. A canonical audit-record hash covers every audit column and
+metadata, and is verified on retrieval. Failed approvals do not create
+decision or audit rows.
+
+Approval and rejection do not mutate the plan identity or snapshot, do not
+perform execution, and do not write to Flagsmith. `executions` and
+`execution_steps` below remain proposed only.
+
+### `executions` (proposed; not implemented)
 
 -   `id` UUID
 -   `plan_id`
@@ -221,7 +250,7 @@ changes plan state or calls the drafting agent.
 Unique constraint on `idempotency_key` within the appropriate owner/plan
 scope.
 
-### `execution_steps`
+### `execution_steps` (proposed; not implemented)
 
 -   `id` UUID
 -   `execution_id`
@@ -238,7 +267,7 @@ scope.
 -   `started_at`
 -   `completed_at`
 
-### `audit_events`
+### `audit_events` (proposed; M4.5 uses `experiment_plan_decision_audit`)
 
 -   `id` UUID
 -   `actor_user_id`
@@ -252,15 +281,9 @@ scope.
 
 ``` mermaid
 erDiagram
-    USERS ||--o{ FLAGSMITH_CONNECTIONS : owns
-    FLAGSMITH_CONNECTIONS ||--o{ FLAGSMITH_CONTEXTS : exposes
-    USERS ||--o{ EXPERIMENT_PLANS : creates
-    FLAGSMITH_CONNECTIONS ||--o{ EXPERIMENT_PLANS : used_by
-    EXPERIMENT_PLANS ||--o{ APPROVALS : receives
-    EXPERIMENT_PLANS ||--o{ EXECUTIONS : produces
-    APPROVALS ||--o{ EXECUTIONS : authorizes
-    EXECUTIONS ||--o{ EXECUTION_STEPS : contains
-    EXPERIMENT_PLANS ||--o{ AUDIT_EVENTS : records
+    EXPERIMENT_PLANS ||--|{ EXPERIMENT_PLAN_VERSIONS : snapshots
+    EXPERIMENT_PLAN_VERSIONS ||--o| EXPERIMENT_PLAN_DECISIONS : decided_for
+    EXPERIMENT_PLAN_DECISIONS ||--|| EXPERIMENT_PLAN_DECISION_AUDIT : audited_by
 ```
 
 ## 4. Retention

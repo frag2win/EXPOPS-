@@ -2,7 +2,8 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
+from pydantic import ValidationError
 
 from app.api.dependencies import get_current_principal, get_flagsmith_adapter
 from app.db.runtime import session_scope, transaction_scope
@@ -27,7 +28,16 @@ from app.domain.experiments.persistence_models import (
     PlanVersionHistoryResponse,
     ProvenanceSummary,
 )
+from app.domain.experiments.decision_models import (
+    ApprovalRequest,
+    DecisionHistoryResponse,
+    DecisionType,
+    ExperimentPlanDecisionResponse,
+    RejectionRequest,
+    RevalidationOutcome,
+)
 from app.persistence.experiment_plans import (
+    PlanIntegrityError,
     append_plan_version,
     create_plan,
     get_plan,
@@ -36,7 +46,26 @@ from app.persistence.experiment_plans import (
     list_plans,
     manual_provenance,
 )
+from app.persistence.experiment_decisions import (
+    ApprovalRevalidationError,
+    DecisionConflictError,
+    DecisionIdempotencyConflictError,
+    DecisionPlanNotFoundError,
+    DecisionVersionNotFoundError,
+    StaleApprovalRevalidationError,
+    StalePlanVersionError,
+    approval_blocking_reasons,
+    build_revalidation_snapshot,
+    decision_request_hash,
+    get_idempotent_decision,
+    get_owned_plan_version,
+    get_plan_decision,
+    get_plan_decisions,
+    record_plan_decision,
+    rejection_revalidation_snapshot,
+)
 from app.services.experiment_planning import ExperimentPlanningService
+from app.integrations.flagsmith.exceptions import FlagsmithError
 
 router = APIRouter(prefix="/api/v1/experiments", tags=["experiments"])
 
@@ -357,6 +386,328 @@ async def get_persisted_experiment_plan_version(
     if result is None:
         raise HTTPException(status_code=404, detail="Experiment plan was not found.")
     return _review_response(*result)
+
+
+def _validated_idempotency_key(value: str) -> str:
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > 128
+        or not normalized.isprintable()
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_IDEMPOTENCY_KEY",
+                "message": "A printable idempotency key of 1 to 128 characters is required.",
+            },
+        )
+    return normalized
+
+
+async def _submit_plan_decision(
+    *,
+    request: Request,
+    response: Response,
+    plan_id: str,
+    version_number: int,
+    principal: Principal,
+    decision_type: DecisionType,
+    idempotency_key: str,
+    adapter: FlagsmithAdapter | None = None,
+    rejection_reason: str | None = None,
+) -> ExperimentPlanDecisionResponse:
+    runtime = request.app.state.database_runtime
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="Plan decision persistence is not configured.")
+    try:
+        parsed_id = UUID(plan_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Experiment plan was not found.") from None
+    if version_number < 1:
+        raise HTTPException(status_code=404, detail="Experiment plan version was not found.")
+
+    key = _validated_idempotency_key(idempotency_key)
+    request_hash = decision_request_hash(
+        parsed_id,
+        version_number,
+        decision_type,
+        rejection_reason,
+    )
+    async with session_scope(runtime.session_factory) as session:
+        owned = await get_owned_plan_version(
+            session,
+            parsed_id,
+            version_number,
+            principal,
+        )
+        if owned is None:
+            raise HTTPException(status_code=404, detail="Experiment plan was not found.")
+        identity, version = owned
+        try:
+            existing = await get_idempotent_decision(
+                session,
+                principal,
+                key,
+                request_hash,
+            )
+        except DecisionIdempotencyConflictError:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IDEMPOTENCY_KEY_CONFLICT",
+                    "message": "The idempotency key was already used for a different request.",
+                },
+            ) from None
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return existing
+        if identity.current_version != version_number:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "STALE_PLAN_VERSION",
+                    "message": "A decision can only be recorded for the current plan version.",
+                },
+            )
+        content_digest = version.content_hash
+
+    if decision_type == DecisionType.APPROVED:
+        if adapter is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "APPROVAL_REVALIDATION_UNAVAILABLE",
+                    "message": "Approval revalidation could not be completed.",
+                },
+            )
+        try:
+            specification = ExperimentSpecification.model_validate(
+                version.specification_json,
+            )
+        except ValidationError:
+            raise PlanIntegrityError(
+                "Stored plan specification is invalid.",
+            ) from None
+        try:
+            planning = await ExperimentPlanningService(
+                adapter,
+            ).plan(specification)
+        except FlagsmithError:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "APPROVAL_REVALIDATION_UNAVAILABLE",
+                    "message": "Approval revalidation could not be completed.",
+                },
+            ) from None
+        if planning.validation.specification != specification:
+            raise PlanIntegrityError(
+                "Revalidation did not use the stored plan specification.",
+            )
+        revalidation = build_revalidation_snapshot(
+            parsed_id,
+            version_number,
+            content_digest,
+            planning.validation,
+        )
+        if revalidation.outcome != RevalidationOutcome.PASSED:
+            raise ApprovalRevalidationError(revalidation)
+    else:
+        revalidation = rejection_revalidation_snapshot(
+            parsed_id,
+            version_number,
+            content_digest,
+        )
+
+    try:
+        decision, was_idempotent = await record_plan_decision(
+            runtime.session_factory,
+            principal=principal,
+            plan_id=parsed_id,
+            plan_version=version_number,
+            content_hash=content_digest,
+            decision_type=decision_type,
+            idempotency_key=key,
+            revalidation=revalidation,
+            rejection_reason=rejection_reason,
+        )
+    except DecisionPlanNotFoundError:
+        raise HTTPException(status_code=404, detail="Experiment plan was not found.") from None
+    except DecisionVersionNotFoundError:
+        raise HTTPException(status_code=404, detail="Experiment plan version was not found.") from None
+    except StalePlanVersionError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_PLAN_VERSION",
+                "message": "A decision can only be recorded for the current plan version.",
+            },
+        ) from None
+    except StaleApprovalRevalidationError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_APPROVAL_REVALIDATION",
+                "message": "Approval evidence expired before the decision was recorded; retry approval.",
+            },
+        ) from None
+    except DecisionConflictError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PLAN_VERSION_ALREADY_DECIDED",
+                "message": "This plan version already has a terminal decision.",
+            },
+        ) from None
+    except DecisionIdempotencyConflictError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "IDEMPOTENCY_KEY_CONFLICT",
+                "message": "The idempotency key was already used for a different request.",
+            },
+        ) from None
+    response.status_code = (
+        status.HTTP_200_OK if was_idempotent else status.HTTP_201_CREATED
+    )
+    return decision
+
+
+@router.post(
+    "/plans/{plan_id}/versions/{version_number}/approve",
+    response_model=ExperimentPlanDecisionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def approve_experiment_plan_version(
+    plan_id: str,
+    version_number: int,
+    request: Request,
+    response: Response,
+    _payload: ApprovalRequest | None = None,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    principal: Principal = Depends(get_current_principal),
+    adapter: FlagsmithAdapter = Depends(get_flagsmith_adapter),
+) -> ExperimentPlanDecisionResponse:
+    try:
+        return await _submit_plan_decision(
+            request=request,
+            response=response,
+            plan_id=plan_id,
+            version_number=version_number,
+            principal=principal,
+            decision_type=DecisionType.APPROVED,
+            idempotency_key=idempotency_key,
+            adapter=adapter,
+        )
+    except ApprovalRevalidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "APPROVAL_REVALIDATION_FAILED",
+                "message": "The plan did not pass approval revalidation.",
+                "readiness": (
+                    error.snapshot.readiness.value
+                    if error.snapshot.readiness is not None
+                    else None
+                ),
+                "blocking_reasons": approval_blocking_reasons(error.snapshot),
+            },
+        ) from None
+
+
+@router.post(
+    "/plans/{plan_id}/versions/{version_number}/reject",
+    response_model=ExperimentPlanDecisionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def reject_experiment_plan_version(
+    plan_id: str,
+    version_number: int,
+    payload: RejectionRequest,
+    request: Request,
+    response: Response,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    principal: Principal = Depends(get_current_principal),
+) -> ExperimentPlanDecisionResponse:
+    return await _submit_plan_decision(
+        request=request,
+        response=response,
+        plan_id=plan_id,
+        version_number=version_number,
+        principal=principal,
+        decision_type=DecisionType.REJECTED,
+        idempotency_key=idempotency_key,
+        rejection_reason=payload.reason,
+    )
+
+
+@router.get(
+    "/plans/{plan_id}/decisions",
+    response_model=DecisionHistoryResponse,
+)
+async def list_experiment_plan_decisions(
+    plan_id: str,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> DecisionHistoryResponse:
+    runtime = request.app.state.database_runtime
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="Plan decision persistence is not configured.")
+    try:
+        parsed_id = UUID(plan_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Experiment plan was not found.") from None
+    async with session_scope(runtime.session_factory) as session:
+        result = await get_plan_decisions(
+            session,
+            parsed_id,
+            principal,
+            offset=(page - 1) * page_size,
+            limit=page_size,
+        )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Experiment plan was not found.")
+    items, total = result
+    return DecisionHistoryResponse(
+        plan_id=parsed_id,
+        items=items,
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+@router.get(
+    "/plans/{plan_id}/decisions/{decision_id}",
+    response_model=ExperimentPlanDecisionResponse,
+)
+async def get_experiment_plan_decision(
+    plan_id: str,
+    decision_id: str,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> ExperimentPlanDecisionResponse:
+    runtime = request.app.state.database_runtime
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="Plan decision persistence is not configured.")
+    try:
+        parsed_plan_id = UUID(plan_id)
+        parsed_decision_id = UUID(decision_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Experiment plan decision was not found.") from None
+    async with session_scope(runtime.session_factory) as session:
+        decision = await get_plan_decision(
+            session,
+            parsed_plan_id,
+            parsed_decision_id,
+            principal,
+        )
+    if decision is None:
+        raise HTTPException(status_code=404, detail="Experiment plan decision was not found.")
+    return decision
 
 
 @router.post("/draft", response_model=ExperimentDraftResponse)

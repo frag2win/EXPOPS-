@@ -6,13 +6,15 @@ specification drafting; deterministic validation remains authoritative.
 
 The long-term goal is to turn a developer's intent into a validated,
 reviewable plan and support approved management-plane operations through
-Flagsmith. Current implementation also offers an optional AI-assisted draft;
-the implemented workflow still stops before approval and execution.
+Flagsmith. Current implementation also offers an optional AI-assisted draft
+and exact-version approval/rejection; execution remains disabled.
 
 > **Project status:** Milestones 1 and 2, plus Milestone 3 AI-assisted
-> specification drafting, M4.2 immutable plan persistence, and M4.3 read-only
-> plan review are implemented. Drafts remain subject to user review. There is
-> no approval workflow, Flagsmith write, execution, or frontend.
+> specification drafting, M4.2 immutable plan persistence, M4.3 read-only
+> plan review, M4.4 local identity, and M4.5 human decisions are implemented.
+> Approval revalidates the exact persisted version and fails closed when any
+> readiness is unknown. No Flagsmith writes, experiment execution, or frontend
+> are implemented.
 
 ## The problem
 
@@ -152,14 +154,15 @@ The authenticated principal is
 resolved once through a shared server-side dependency. Client bodies,
 query parameters, and headers cannot select or override it. All persisted
 plan creation, listing, current reads, history reads, and exact-version reads
-are scoped to this principal. This identity abstraction is the foundation for
-future auditable decisions, but this milestone adds no approval behavior.
+are scoped to this principal. This identity is also the actor recorded for
+M4.5 decisions; client-supplied identity is never accepted.
 Snapshot retrieval verifies a versioned canonical SHA-256 hash. The dedicated `POST
 /api/v1/experiments/drafts` workflow invokes the server-side drafting agent
 and persists its complete generated envelope and provenance; the existing
 `POST /api/v1/experiments/draft` remains ephemeral. Plan versions are protected
-against database `UPDATE` and `DELETE` by a PostgreSQL trigger. No persistence
-route approves, rejects, executes, or modifies Flagsmith resources.
+against database `UPDATE` and `DELETE` by a PostgreSQL trigger. M4.5 adds
+immutable approval/rejection records and audit rows for exact plan versions.
+No route executes an experiment or modifies Flagsmith resources.
 Migrated ownerless legacy records retain a reserved local marker and remain
 visible to the active configured local principal after principal changes.
 M4.3 adds a paginated, read-only plan list, current-plan review, and paginated
@@ -170,6 +173,32 @@ These responses report `integrity_status: "verified"` only after verification.
 Integrity failures return a sanitized `PLAN_INTEGRITY_FAILED` response. List
 and history pagination use `page` (default `1`) and `page_size` (default `20`,
 maximum `100`). No review endpoint changes plan state.
+
+M4.5 decision routes operate only on the current exact version:
+
+- `POST /api/v1/experiments/plans/{plan_id}/versions/{version_number}/approve`
+  reruns deterministic validation using the stored specification and current
+  read-only Flagsmith data. It requires the `Idempotency-Key` header and
+  returns `422` with blocking reasons unless readiness and every required
+  prerequisite has explicit nonblank evidence and independent verification.
+  Revalidation evidence is accepted only for 60 seconds; older results return
+  `409`. The current warehouse inspector reports
+  `UNKNOWN`, so approval remains blocked until a verified warehouse readiness
+  source exists.
+- `POST /api/v1/experiments/plans/{plan_id}/versions/{version_number}/reject`
+  requires `{"reason":"..."}` and the `Idempotency-Key` header. Rejection
+  records the exact version without running approval revalidation.
+- `GET /api/v1/experiments/plans/{plan_id}/decisions?page=1&page_size=20`
+  lists the plan's immutable decisions; `page_size` is bounded to 100.
+- `GET /api/v1/experiments/plans/{plan_id}/decisions/{decision_id}` returns an
+  exact decision and its audit record.
+
+The configured local principal is the decision actor. A plan version can have
+only one terminal decision; retries with the same principal, idempotency key,
+and request return the original decision, while conflicting reuse returns
+`409`. Decision and audit writes share one transaction and PostgreSQL prevents
+their updates/deletions. These records do not change the plan, authorize
+execution, or enable Flagsmith writes.
 Put real local credentials only in the ignored root
 `.env`, never in `.env.example` or documentation. See
 [`docs/08-DATABASE-DESIGN.md`](docs/08-DATABASE-DESIGN.md) for setup and
@@ -237,6 +266,10 @@ routes:
 - `GET /api/v1/experiments/plans/{plan_id}`
 - `GET /api/v1/experiments/plans/{plan_id}/versions?page=1&page_size=20`
 - `GET /api/v1/experiments/plans/{plan_id}/versions/{version_number}`
+- `POST /api/v1/experiments/plans/{plan_id}/versions/{version_number}/approve`
+- `POST /api/v1/experiments/plans/{plan_id}/versions/{version_number}/reject`
+- `GET /api/v1/experiments/plans/{plan_id}/decisions?page=1&page_size=20`
+- `GET /api/v1/experiments/plans/{plan_id}/decisions/{decision_id}`
 - `POST /api/v1/experiments/draft`
 - `POST /api/v1/experiments/drafts`
 
@@ -247,7 +280,14 @@ GET /api/v1/experiments/plans?page=1&page_size=20
 GET /api/v1/experiments/plans/PLAN_UUID
 GET /api/v1/experiments/plans/PLAN_UUID/versions?page=1&page_size=20
 GET /api/v1/experiments/plans/PLAN_UUID/versions/1
+POST /api/v1/experiments/plans/PLAN_UUID/versions/1/approve
+POST /api/v1/experiments/plans/PLAN_UUID/versions/1/reject
+GET /api/v1/experiments/plans/PLAN_UUID/decisions?page=1&page_size=20
 ```
+
+Decision requests require an `Idempotency-Key` header. The approval body may
+be omitted or empty; the rejection body must include a nonblank reason.
+Neither request accepts an owner or actor field.
 
 The list response contains compact current-version metadata and verifies each
 listed current snapshot; it does not fetch historical snapshots. Detail and

@@ -144,6 +144,7 @@ class PrerequisiteSnapshot(DomainModel):
     feature_experiment_message: str = "Experiment support has not been established."
     warehouse_status: ReadinessStatus = ReadinessStatus.UNKNOWN
     warehouse_message: str = "Warehouse readiness has not been established."
+    warehouse_evidence: str | None = None
 
 
 class ValidationCheck(DomainModel):
